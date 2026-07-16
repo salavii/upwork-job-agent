@@ -27,6 +27,15 @@ Requirements before running this file:
 # because Ollama exposes itself as a small web server on your machine.
 import requests
 
+# `re` (regular expressions) is used to pull just the SCORE and VERDICT
+# lines out of the model's reply, so we can rank jobs without printing
+# the model's full raw text for each one.
+import re
+
+# The file containing multiple job postings, separated by a line with
+# just "---". See jobs.txt in this same folder for the example jobs.
+JOBS_FILE = "jobs.txt"
+
 # This is the standard local address Ollama listens on. "11434" is just
 # the fixed port number Ollama always uses by default.
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -115,7 +124,7 @@ VERDICT: <one short sentence>
 """
 
 
-def ask_ollama(prompt):
+def ask_ollama(prompt, temperature=0):
     """
     Send `prompt` to the local Ollama server and return the model's
     text reply as a string.
@@ -127,6 +136,16 @@ def ask_ollama(prompt):
       this first test as simple as possible, we set "stream": False so
       Ollama waits and sends back the whole answer in one single
       response instead of many small chunks.
+    - "temperature" controls how random the model's word choices are.
+      Higher temperature (e.g. 0.7-1.0) makes replies more varied and
+      "creative" - good for brainstorming, bad for scoring, because the
+      same job could get a different score every time we ask. Setting
+      temperature to 0 makes the model always pick its single most
+      likely next word, which is what we want for a scoring task: the
+      same (profile, job) pair should produce the same score every run,
+      so the ranking is trustworthy and comparable across jobs and over
+      time. We pass it inside an "options" object, which is where
+      Ollama expects generation settings like this to live.
     - requests.post(...) sends the HTTP request; .json() parses the
       JSON reply into a normal Python dictionary.
     - The actual generated text lives under the "response" key of that
@@ -136,6 +155,9 @@ def ask_ollama(prompt):
         "model": MODEL_NAME,
         "prompt": prompt,
         "stream": False,
+        "options": {
+            "temperature": temperature,
+        },
     }
 
     response = requests.post(OLLAMA_URL, json=request_body)
@@ -185,40 +207,71 @@ JOB POSTING:
 {RESPONSE_FORMAT_INSTRUCTIONS}
 """
 
-    return ask_ollama(prompt)
+    # temperature=0 so the same job scores the same way every time we
+    # run this - see the comment on ask_ollama() for why that matters.
+    return ask_ollama(prompt, temperature=0)
+
+
+def load_jobs(file_path):
+    """
+    Read `file_path` and split its contents into a list of separate job
+    posting strings, wherever a line contains just "---".
+
+    Each job's leading/trailing blank lines are stripped with .strip(),
+    so the job text is clean before we hand it to score_job().
+    """
+    with open(file_path, "r", encoding="utf-8") as f:
+        file_contents = f.read()
+
+    raw_jobs = file_contents.split("---")
+    return [job.strip() for job in raw_jobs if job.strip()]
+
+
+def parse_score_and_verdict(raw_reply):
+    """
+    Pull just the SCORE and VERDICT values out of a score_job() reply,
+    so we can rank jobs without re-printing the model's full response
+    for each one.
+
+    We use simple regexes to find "SCORE: <number>" and
+    "VERDICT: <text>" anywhere in the reply. If the model didn't follow
+    the format for some reason and a piece can't be found, we fall back
+    to a 0 score / "(no verdict found)" placeholder instead of crashing,
+    so one malformed reply doesn't stop the whole ranking.
+    """
+    score_match = re.search(r"SCORE:\s*(\d+)", raw_reply)
+    verdict_match = re.search(r"VERDICT:\s*(.+)", raw_reply)
+
+    score = int(score_match.group(1)) if score_match else 0
+    verdict = verdict_match.group(1).strip() if verdict_match else "(no verdict found)"
+
+    return score, verdict
 
 
 # The `if __name__ == "__main__":` line below means: "only run this code
 # when this file is executed directly (e.g. `python match_llm.py`), not
 # when it's imported by another file."
 if __name__ == "__main__":
-    # The same real Upwork job used earlier to test match.py, so we can
-    # compare the LLM-based score against the keyword-based one.
-    rag_document_qa_job_description = """
-    AI Engineer needed to build RAG Document Q&A System
+    jobs = load_jobs(JOBS_FILE)
 
-    I need an AI engineer to build a production-grade RAG system that allows
-    users to upload PDF documents and ask questions in natural language,
-    receiving accurate answers with source citations.
-    Requirements:
-    - Multi-format document ingestion (PDF, DOCX, TXT)
-    - Arabic and English language support
-    - Hybrid search: BM25 + semantic embeddings
-    - Cross-encoder reranking for accuracy
-    - Source citation with document name and page number
-    - JWT authentication with multi-tenant support
-    - Async background processing with job status tracking
-    - Query caching
-    - FastAPI REST API backend
-    - Observability and tracing
+    print(f"Loaded {len(jobs)} jobs from {JOBS_FILE}. Scoring each with {MODEL_NAME}...\n")
 
-    Mandatory skills: Artificial Intelligence, Machine Learning, Python,
-    Artificial Neural Network
-    """
+    # Score every job, and keep (score, verdict, job_text) together so we
+    # can sort and print them afterwards.
+    scored_jobs = []
+    for job_text in jobs:
+        raw_reply = score_job(job_text)
+        score, verdict = parse_score_and_verdict(raw_reply)
+        scored_jobs.append((score, verdict, job_text))
 
-    print(f"Scoring job with {MODEL_NAME} via Ollama...\n")
+    # Sort highest score first. key=lambda item: item[0] tells sort() to
+    # compare by the score (the first element of each tuple); reverse=True
+    # makes it descending instead of ascending.
+    scored_jobs.sort(key=lambda item: item[0], reverse=True)
 
-    result = score_job(rag_document_qa_job_description)
-
-    print("===== LLM Job Match Report: RAG Document Q&A System =====")
-    print(result)
+    print("===== Ranked Job Matches =====\n")
+    for rank, (score, verdict, job_text) in enumerate(scored_jobs, start=1):
+        # Use the job's first line as a short title in the output.
+        job_title = job_text.splitlines()[0].strip()
+        print(f"#{rank} - SCORE: {score} - {job_title}")
+        print(f"   Verdict: {verdict}\n")
