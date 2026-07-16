@@ -40,39 +40,55 @@ MODEL_NAME = "llama3.1:8b"
 # whether a job is a good fit.
 MY_PROFILE = """[REDACTED - moved to gitignored config.json]"""
 
-# Scoring rules for the model to follow. Earlier versions of this prompt
-# just asked for "a match score" with no guidance on how strict to be,
-# and the model came back too generous (82/100 on a job that was mostly
-# heavy backend work I can't do alone). This rubric forces the model to
-# separate "mandatory/core" requirements from "nice-to-have" ones, and to
-# anchor the score to a concrete question: could I realistically deliver
-# MOST of this job by myself? Missing core requirements should cap the
-# score low, even if I match plenty of the nice-to-haves.
+# Scoring rules for the model to follow. This has gone through two
+# rounds of fixes:
+# - v1 just asked for "a match score" with no guidance on how strict to
+#   be, and the model came back too generous (82/100 on a job that was
+#   mostly heavy backend work I can't do alone).
+# - v2 added strict weighting of mandatory/core requirements, but
+#   OVERCORRECTED: the model started penalizing gaps (e.g. "no
+#   backend/infra experience") even on jobs that never asked for
+#   backend/infra at all - it was judging me against my whole profile's
+#   weaknesses instead of against what THIS job actually needs.
+# - v3 (this version) explicitly forces the model to first extract what
+#   the job actually requires, and only count a gap against me if it
+#   maps to one of those requirements. A skill I lack that the job never
+#   asked for must NOT lower the score.
 STRICT_SCORING_GUIDELINES = """
 Score as a STRICT freelance-fit judge, not an encouraging recruiter. Be
 skeptical: most real jobs need several different skills, and partially
-matching is not the same as being able to deliver the job.
+matching is not the same as being able to deliver the job. At the same
+time, be FAIR: only judge the candidate against what THIS job actually
+asks for, never against unrelated skills the candidate happens to lack.
 
 Follow these steps before assigning a score:
-1. Identify which requirements in the job posting are MANDATORY/CORE
-   (explicitly marked as required/mandatory, or clearly central to what
-   the job is actually about) versus which are NICE-TO-HAVE (secondary
+1. Extract a short list of what THIS job actually requires, based only
+   on the job posting text. Split that list into MANDATORY/CORE
+   requirements (explicitly required/mandatory, or clearly central to
+   what the job is about) versus NICE-TO-HAVE requirements (secondary
    features, bonus skills, or minor details).
-2. Check the candidate profile against the MANDATORY/CORE requirements
-   first. If the candidate is missing one or more mandatory/core
-   requirements, the score MUST drop sharply - a missing essential skill
-   caps the score low even if many nice-to-haves match.
-3. Only after core requirements are covered should nice-to-have matches
-   push the score higher.
+2. Compare the candidate profile only against that extracted list.
+   - A "gap" only counts if it maps to something on this list. If the
+     job never mentioned or implied a skill (e.g. backend frameworks,
+     deployment, a specific language), the candidate's lack of that
+     skill is IRRELEVANT and must NOT be listed as a gap or lower the
+     score.
+   - If the candidate is missing one or more MANDATORY/CORE items from
+     the extracted list, the score MUST drop sharply - a missing
+     essential, job-relevant skill caps the score low even if many
+     nice-to-haves match.
+3. Only after core, job-relevant requirements are covered should
+   nice-to-have matches push the score higher.
 
 Use these score anchors as a guide:
-- 80-100: the candidate could realistically deliver MOST of this job
-  alone, including its core/mandatory requirements.
-- 40-60: the candidate can only competently handle ONE part of the job
-  (e.g. the ML/modeling side) while other core parts (e.g. backend,
-  infra, a required language) are weak or missing.
-- Below 40: the candidate is missing multiple core/mandatory
-  requirements and would need significant help to deliver this job.
+- 80-100: the candidate covers essentially all of what THIS job actually
+  requires (mandatory/core requirements included), so they could
+  realistically deliver most of it alone.
+- 40-60: the candidate covers only part of what THIS job requires -
+  some job-relevant mandatory/core requirements are weak or missing.
+- Below 40: the candidate is missing multiple job-relevant
+  mandatory/core requirements and would need significant help to
+  deliver this job.
 """
 
 # The exact format we want the model to reply in. Spelling this out in
@@ -81,17 +97,20 @@ Use these score anchors as a guide:
 # code later, if we want to extract just the score, for example.
 RESPONSE_FORMAT_INSTRUCTIONS = """
 Respond in EXACTLY this format, with nothing before or after it, and no
-markdown formatting (no asterisks, no headers):
+markdown formatting (no asterisks, no headers). Fill in JOB REQUIRES
+FIRST, and only list a gap in GAPS if it also appears in JOB REQUIRES -
+if a candidate weakness is not in JOB REQUIRES, it must be left out of
+GAPS entirely, since the job never asked for it:
 
+JOB REQUIRES: <comma-separated list of what this job actually needs, mandatory items marked with (core)>
 SCORE: <a single integer from 0 to 100>
 STRENGTHS:
 - <strength 1>
 - <strength 2>
 - <strength 3 (optional)>
 GAPS:
-- <gap 1>
-- <gap 2>
-- <gap 3 (optional)>
+- <gap - must be an item from JOB REQUIRES that the candidate lacks>
+- <gap 2 (optional, same rule)>
 VERDICT: <one short sentence>
 """
 
