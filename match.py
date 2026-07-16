@@ -6,8 +6,11 @@ Step 1 of the Upwork job-scoring agent.
 What this script does:
 1. Stores my list of skills.
 2. Checks a job description to see which of my skills are mentioned in it.
-3. Turns that into a simple 0-100 "match score".
-4. Prints the result for one example job description.
+3. Figures out which skills the JOB is asking for (not just how many of
+   my skills I happen to know overall).
+4. Turns that into a simple 0-100 "match score": how much of what the
+   job needs do I actually have.
+5. Prints the result for one example job description.
 
 This is intentionally simple: it looks for each skill as a whole
 word/phrase inside the job description (ignoring upper/lower case
@@ -47,6 +50,65 @@ MY_SKILLS = [
     "computer vision",
     "transformers",
 ]
+
+# A small, hardcoded list of common ML keywords to check for in the job
+# text, ON TOP OF my own skills list. This helps us guess what the job
+# actually needs, even for terms that aren't (only) on my skill list.
+# Some of these overlap with MY_SKILLS on purpose - that's fine, we
+# combine both lists into a single set of unique requirements later.
+COMMON_ML_KEYWORDS = [
+    "Python",
+    "PyTorch",
+    "TensorFlow",
+    "Hugging Face",
+    "LoRA",
+    "RAG",
+    "NLP",
+    "computer vision",
+    "LLM",
+]
+
+# Some skills get matched under more than one name because MY_SKILLS and
+# COMMON_ML_KEYWORDS use slightly different phrasing for the same thing
+# (e.g. COMMON_ML_KEYWORDS has "LoRA" and "Hugging Face" as short forms,
+# while MY_SKILLS has the fuller "PEFT/LoRA" and "Hugging Face
+# Transformers"). Without this mapping, a single mention in the job text
+# could be counted as two separate requirements.
+#
+# Keys must be lowercase (we always look them up in lowercase). Each key
+# maps to the one "canonical" skill name we want to keep instead.
+SKILL_ALIASES = {
+    "lora": "PEFT/LoRA",
+    "transformers": "Hugging Face Transformers",
+    "hugging face": "Hugging Face Transformers",
+}
+
+
+def canonicalize_skills(skill_names):
+    """
+    Rewrite a list of skill names so that known aliases collapse into a
+    single canonical name, and remove any duplicates that result.
+
+    Example: ["PEFT/LoRA", "LoRA"] -> ["PEFT/LoRA"]
+    (because SKILL_ALIASES maps "lora" to "PEFT/LoRA", so both entries
+    end up being the same canonical name, and we only keep it once.)
+
+    We keep the first-seen order of the input list, which keeps the
+    printed output stable and easy to read.
+    """
+    canonical_names = []
+    seen = set()
+
+    for name in skill_names:
+        # Look up the lowercased name in SKILL_ALIASES; if it's not a
+        # known alias, just keep the name as-is.
+        canonical_name = SKILL_ALIASES.get(name.lower(), name)
+
+        if canonical_name not in seen:
+            seen.add(canonical_name)
+            canonical_names.append(canonical_name)
+
+    return canonical_names
 
 
 # -----------------------------------------------------------------------
@@ -120,24 +182,62 @@ def find_matched_skills(job_description, skills):
 
 
 # -----------------------------------------------------------------------
-# 3. FUNCTION: turn matched skills into a 0-100 score
+# 3. FUNCTION: figure out which skills THE JOB is asking for
 # -----------------------------------------------------------------------
-def compute_match_score(matched_skills, all_skills):
+def find_job_requirements(job_description, my_skills, common_keywords):
     """
-    Compute a simple percentage score:
+    Estimate the set of skills this specific job needs, so we can later
+    score "how much of what the job needs do I have" instead of "how
+    much of everything I know does this job need" (which unfairly
+    punishes a perfect match just because my overall skill list is long).
 
-        score = (number of skills matched / total number of my skills) * 100
+    We estimate "what the job needs" as the UNION of:
+      - any of MY_SKILLS that are mentioned in the job text, and
+      - any of the COMMON_ML_KEYWORDS that are mentioned in the job text.
 
-    Example: if I have 10 skills total and 3 of them were found in the
-    job post, the score is (3 / 10) * 100 = 30.
+    Combining both matters because the common-keywords list can catch
+    requirement phrasing that isn't identical to my own skill list
+    (e.g. "Hugging Face" on its own, without the word "Transformers").
+    We reuse find_matched_skills() for both lists since the whole-word
+    matching logic is exactly the same either way.
 
-    round(..., ) is used so we get a clean whole number like 30 instead
-    of something like 30.000000004.
+    Because the two lists use different phrasing for some of the same
+    skill (e.g. "LoRA" vs. "PEFT/LoRA"), we run the combined list through
+    canonicalize_skills() before turning it into a set, so the same real
+    mention doesn't get counted as two separate requirements.
     """
-    if not all_skills:  # avoid dividing by zero if the skill list is empty
+    requirements_from_my_skills = find_matched_skills(job_description, my_skills)
+    requirements_from_common_keywords = find_matched_skills(job_description, common_keywords)
+
+    # Combine both lists, then collapse known aliases (e.g. "LoRA" and
+    # "PEFT/LoRA") into a single canonical name before deduplicating.
+    all_requirements = requirements_from_my_skills + requirements_from_common_keywords
+    return set(canonicalize_skills(all_requirements))
+
+
+# -----------------------------------------------------------------------
+# 4. FUNCTION: turn matched skills into a 0-100 score
+# -----------------------------------------------------------------------
+def compute_match_score(matched_skills, job_requirements):
+    """
+    Compute a percentage score based on how much of what THE JOB needs
+    I actually have:
+
+        score = (number of my skills matched / number of skills the job needs) * 100
+
+    Example: if the job needs 5 skills and I match 4 of them, the score
+    is (4 / 5) * 100 = 80. This is different from (and more meaningful
+    than) dividing by the size of my entire skill list, because a job
+    that only needs 3 skills - all of which I have - should score close
+    to 100, not be capped low just because I know 19 skills overall.
+
+    round(..., ) is used so we get a clean whole number like 80 instead
+    of something like 80.000000004.
+    """
+    if not job_requirements:  # avoid dividing by zero if nothing was detected
         return 0
 
-    score = (len(matched_skills) / len(all_skills)) * 100
+    score = (len(matched_skills) / len(job_requirements)) * 100
     return round(score)
 
 
@@ -191,17 +291,24 @@ if __name__ == "__main__":
     """
 
     # Step A: find which of my skills show up in this job description
-    matched = find_matched_skills(example_job_description, MY_SKILLS)
+    # (canonicalized too, so aliases collapse here as well, for consistency)
+    matched = canonicalize_skills(find_matched_skills(example_job_description, MY_SKILLS))
 
-    # Step B: compute the score based on how many skills matched
-    score = compute_match_score(matched, MY_SKILLS)
+    # Step B: figure out which skills the JOB is asking for
+    job_requirements = find_job_requirements(
+        example_job_description, MY_SKILLS, COMMON_ML_KEYWORDS
+    )
 
-    # Step C: print the results so I can see them
+    # Step C: compute the score as (my matches) / (what the job needs)
+    score = compute_match_score(matched, job_requirements)
+
+    # Step D: print the results so I can see them
     print("Matched skills:")
     for skill in matched:
         print(f"  - {skill}")
 
-    print(f"\nMatch score: {score}/100")
+    print(f"\nJob requirements detected: {sorted(job_requirements)}")
+    print(f"Match score: {score}/100")
 
-    # Step D: print a plain-English summary of the result
+    # Step E: print a plain-English summary of the result
     print(f"\n{summarize_match(matched, score)}")
