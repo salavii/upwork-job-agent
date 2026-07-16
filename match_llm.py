@@ -36,6 +36,10 @@ import re
 # just "---". See jobs.txt in this same folder for the example jobs.
 JOBS_FILE = "jobs.txt"
 
+# Only jobs scoring at or above this get a drafted proposal - low-scoring
+# jobs aren't worth spending the client's (or the model's) time on.
+PROPOSAL_SCORE_THRESHOLD = 70
+
 # This is the standard local address Ollama listens on. "11434" is just
 # the fixed port number Ollama always uses by default.
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -212,6 +216,60 @@ JOB POSTING:
     return ask_ollama(prompt, temperature=0)
 
 
+def draft_proposal(job_text):
+    """
+    Ask the model to write a short Upwork proposal for `job_text`, based
+    on MY_PROFILE.
+
+    Unlike score_job(), this call uses a HIGHER temperature (0.7) on
+    purpose. Scoring needs to be consistent every time (temperature=0),
+    but writing needs some natural variation in wording and phrasing to
+    avoid sounding stiff and robotic - a bit of randomness here is a
+    feature, not a bug.
+
+    The prompt asks for a short (120-160 word) proposal that:
+    - opens with something specific to this job, not a generic greeting
+    - names 2-3 of my most relevant skills/projects for THIS job
+    - stays honest - never claims a skill that isn't in MY_PROFILE
+    - ends with a simple call to action
+    - reads like a warm, human message, not an overly formal cover letter
+
+    Returns the drafted proposal as a plain string.
+    """
+    prompt = f"""You are me, a freelancer, writing a short Upwork proposal to apply
+to the job posting below. Write in first person, as if I'm writing it
+myself.
+
+CANDIDATE PROFILE (this is who I am - only mention skills/experience
+that actually appear here; never invent or exaggerate anything):
+{MY_PROFILE}
+
+JOB POSTING:
+{job_text}
+
+Write a proposal that:
+- Is 120-160 words long.
+- Opens by addressing the client's specific need described in the job
+  posting - not a generic "I am excited to apply" opener.
+- Names 2-3 of my most relevant skills or projects FOR THIS SPECIFIC JOB
+  (pick whichever items from my profile are most relevant to this job,
+  not just a random list).
+- Is completely honest - do NOT claim any skill, tool, or experience
+  that isn't in my profile above.
+- Ends with a simple, low-pressure call to action (e.g. inviting a
+  quick chat or asking a clarifying question).
+- Sounds human and warm, like a real person wrote it - not robotic,
+  not overly formal, no corporate buzzwords.
+
+Respond with ONLY the proposal text itself - no preamble, no headers,
+no notes about word count.
+"""
+
+    # temperature=0.7 (higher than scoring) so the writing sounds natural
+    # instead of terse/robotic - see the docstring above for why.
+    return ask_ollama(prompt, temperature=0.7)
+
+
 def load_jobs(file_path):
     """
     Read `file_path` and split its contents into a list of separate job
@@ -274,4 +332,13 @@ if __name__ == "__main__":
         # Use the job's first line as a short title in the output.
         job_title = job_text.splitlines()[0].strip()
         print(f"#{rank} - SCORE: {score} - {job_title}")
-        print(f"   Verdict: {verdict}\n")
+        print(f"   Verdict: {verdict}")
+
+        # Only draft (and print) a proposal for high-scoring jobs - it's
+        # not worth writing one for a job I'm a poor fit for.
+        if score >= PROPOSAL_SCORE_THRESHOLD:
+            proposal = draft_proposal(job_text)
+            print("\n   Drafted proposal:")
+            print(f"   {proposal}")
+
+        print()
