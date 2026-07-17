@@ -275,29 +275,23 @@ def summarize_match(matched_skills, score):
 
 
 # -----------------------------------------------------------------------
-# 5. EXAMPLE: run the functions above on one sample job posting
+# 5. FUNCTION: run the full pipeline on one job and print a report
 # -----------------------------------------------------------------------
-# The `if __name__ == "__main__":` line below means: "only run this code
-# when this file is executed directly (e.g. `python match.py`), not when
-# it's imported by another file."
-if __name__ == "__main__":
-    example_job_description = """
-    We are looking for a Machine Learning Engineer to help us build a
-    Retrieval-Augmented Generation (RAG) pipeline for our internal
-    knowledge base. You should be comfortable with Python, PyTorch, and
-    Hugging Face Transformers. Experience with LLM fine-tuning and
-    PEFT/LoRA is a big plus. Familiarity with Git for version control
-    is required. Bonus points for NLP experience.
+def run_match_report(job_title, job_description):
     """
+    Run every step (matching, job-requirements detection, scoring,
+    summary) on a single job description and print the results. Pulled
+    out into its own function so we can reuse it for multiple example
+    jobs without copy-pasting the same print statements each time.
+    """
+    print(f"===== {job_title} =====")
 
     # Step A: find which of my skills show up in this job description
     # (canonicalized too, so aliases collapse here as well, for consistency)
-    matched = canonicalize_skills(find_matched_skills(example_job_description, MY_SKILLS))
+    matched = canonicalize_skills(find_matched_skills(job_description, MY_SKILLS))
 
     # Step B: figure out which skills the JOB is asking for
-    job_requirements = find_job_requirements(
-        example_job_description, MY_SKILLS, COMMON_ML_KEYWORDS
-    )
+    job_requirements = find_job_requirements(job_description, MY_SKILLS, COMMON_ML_KEYWORDS)
 
     # Step C: compute the score as (my matches) / (what the job needs)
     score = compute_match_score(matched, job_requirements)
@@ -312,3 +306,48 @@ if __name__ == "__main__":
 
     # Step E: print a plain-English summary of the result
     print(f"\n{summarize_match(matched, score)}")
+    print()  # blank line to separate reports when running multiple jobs
+
+
+# -----------------------------------------------------------------------
+# 6. EXAMPLES: run the pipeline on sample job postings
+# -----------------------------------------------------------------------
+# The `if __name__ == "__main__":` line below means: "only run this code
+# when this file is executed directly (e.g. `python match.py`), not when
+# it's imported by another file."
+if __name__ == "__main__":
+    llama_lora_job_description = """
+    We are looking for a Machine Learning Engineer to help us build a
+    Retrieval-Augmented Generation (RAG) pipeline for our internal
+    knowledge base. You should be comfortable with Python, PyTorch, and
+    Hugging Face Transformers. Experience with LLM fine-tuning and
+    PEFT/LoRA is a big plus. Familiarity with Git for version control
+    is required. Bonus points for NLP experience.
+    """
+
+    # A real Upwork job posting, used to sanity-check the matcher against
+    # actual job text (not just a hand-written example).
+    rag_document_qa_job_description = """
+    AI Engineer needed to build RAG Document Q&A System
+
+    I need an AI engineer to build a production-grade RAG system that allows
+    users to upload PDF documents and ask questions in natural language,
+    receiving accurate answers with source citations.
+    Requirements:
+    - Multi-format document ingestion (PDF, DOCX, TXT)
+    - Arabic and English language support
+    - Hybrid search: BM25 + semantic embeddings
+    - Cross-encoder reranking for accuracy
+    - Source citation with document name and page number
+    - JWT authentication with multi-tenant support
+    - Async background processing with job status tracking
+    - Query caching
+    - FastAPI REST API backend
+    - Observability and tracing
+
+    Mandatory skills: Artificial Intelligence, Machine Learning, Python,
+    Artificial Neural Network
+    """
+
+    run_match_report("LLaMA / LoRA example job", llama_lora_job_description)
+    run_match_report("Real Upwork job: RAG Document Q&A System", rag_document_qa_job_description)

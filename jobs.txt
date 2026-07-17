@@ -1,0 +1,86 @@
+Looking for an ML engineer to fine-tune a LLaMA model using LoRA for a
+customer-support chatbot. Must know Python and Hugging Face. Experience
+with RAG a plus. Remote, English only.
+---
+AI Engineer needed to build RAG Document Q&A System
+
+I need an AI engineer to build a production-grade RAG system that allows
+users to upload PDF documents and ask questions in natural language,
+receiving accurate answers with source citations.
+Requirements:
+- Multi-format document ingestion (PDF, DOCX, TXT)
+- Arabic and English language support
+- Hybrid search: BM25 + semantic embeddings
+- Cross-encoder reranking for accuracy
+- Source citation with document name and page number
+- JWT authentication with multi-tenant support
+- Async background processing with job status tracking
+- Query caching
+- FastAPI REST API backend
+- Observability and tracing
+
+Mandatory skills: Artificial Intelligence, Machine Learning, Python,
+Artificial Neural Network
+---
+Computer Vision Engineer needed to train a CNN model that classifies
+product images into categories (e.g. electronics, clothing, furniture)
+for an e-commerce catalog. Must know Python and PyTorch. Dataset of
+~50k labeled images will be provided. Remote work, flexible hours.
+
+---
+
+Summary
+
+Swiss IT services company (est. 1996, ~10 people), clients in legal and finance. We're building on-premise AI servers for our clients: open-source models, RAG over internal documents and email, full data sovereignty — nothing leaves the building.
+We handle servers, networks and security ourselves. We need someone who has already run this stack in production and can tell us what breaks, not someone building a POC with us.
+What you'd do:
+
+- Hardware/software sizing with precise, justified recommendations: GPU and VRAM, Ollama vs vLLM,
+Open WebUI configuration, vector DB, ingestion pipeline — not a generic opinion, but numbers and choices we can apply directly
+- Hardware sizing for on-prem installs at client sites: GPU/VRAM, CPU/RAM balance, storage, rack vs tower, power/cooling in small server rooms
+- RAG quality in French (non-English)
+- Access control / multi-user setup
+- Maintenance, model updates, monitoring over time
+- 1-2 video calls/week to start, screen-sharing on real deployments, plus async questions by email.
+
+Terms: hourly, ongoing, long-term if it works.
+To apply, answer these three questions — no cover letter, no deck:
+
+- One on-premise LLM/RAG deployment you took to production: team size, stack, hardware, what went wrong. Include something verifiable — reference, case study, repo, or other concrete proof.
+- For a 20-user deployment on 1-2 GPUs: which GPU/VRAM, CPU/RAM, and inference server would you use, and why?
+- Your availability for recurring calls (we're CET).
+
+Applications without a verifiable deployment example will not be considered.
+
+Skills: AIOps
+---
+
+On-premise LLM/Agent/RAG deployment — technical mentor (hourly, ongoing) - DevOps & Solution Architecture
+
+Experience level: Expert | Pricing type: hourly | Hours per week: 30 hrs/week
+
+Summary
+
+Swiss IT services company (est. 1996, ~10 people), clients in legal and finance. We're building on-premise AI servers for our clients: open-source models, RAG over internal documents and email, full data sovereignty — nothing leaves the building.
+We handle servers, networks and security ourselves. We need someone who has already run this stack in production and can tell us what breaks, not someone building a POC with us.
+What you'd do:
+
+- Hardware/software sizing with precise, justified recommendations: GPU and VRAM, Ollama vs vLLM,
+Open WebUI configuration, vector DB, ingestion pipeline — not a generic opinion, but numbers and choices we can apply directly
+- Hardware sizing for on-prem installs at client sites: GPU/VRAM, CPU/RAM balance, storage, rack vs tower, power/cooling in small server rooms
+- RAG quality in French (non-English)
+- Access control / multi-user setup
+- Maintenance, model updates, monitoring over time
+- 1-2 video calls/week to start, screen-sharing on real deployments, plus async questions by email.
+
+Terms: hourly, ongoing, long-term if it works.
+To apply, answer these three questions — no cover letter, no deck:
+
+- One on-premise LLM/RAG deployment you took to production: team size, stack, hardware, what went wrong. Include something verifiable — reference, case study, repo, or other concrete proof.
+- For a 20-user deployment on 1-2 GPUs: which GPU/VRAM, CPU/RAM, and inference server would you use, and why?
+- Your availability for recurring calls (we're CET).
+
+Applications without a verifiable deployment example will not be considered.
+
+Skills: AIOps
+---

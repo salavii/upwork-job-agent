@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Upwork Job Grabber",
+  "version": "1.0.0",
+  "description": "Grab the current Upwork job posting and send it to the local job-scoring server.",
+
+  "action": {
+    "default_popup": "popup.html"
+  },
+
+  "permissions": ["activeTab", "scripting"],
+
+  "host_permissions": [
+    "*://*.upwork.com/*",
+    "http://localhost:8765/*"
+  ]
+}
