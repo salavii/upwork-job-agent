@@ -1,0 +1,26 @@
+{
+  "972be6b1f8aa3948c96fcb684a58ee122b375e2a6641317972f74ff967fbcf7d": {
+    "title": "Image-to-Vector Conversion – Machine Learning AI Model - AI & Machine Learning",
+    "score": 50,
+    "verdict": "Candidate has some relevant skills for the job, but lacks key areas such as AI model integration and Rust programming.",
+    "proposal": null
+  },
+  "79238e8c623e55291fd0c71b501793f6bd0673ae0b3768f7843f67ea66d8b47b": {
+    "title": "AI & Machine Learning Developer Needed for Data Science Project - AI & Machine Learning",
+    "score": 60,
+    "verdict": "Candidate has some relevant experience but lacks essential skills for this job.",
+    "proposal": null
+  },
+  "ca6f970fd85c4cf000163dfe61add1062ee0d58752b3c091dfccfa2b1d3af561": {
+    "title": "On-premise LLM/Agent/RAG deployment — technical mentor (hourly, ongoing) - DevOps & Solution Architecture",
+    "score": 40,
+    "verdict": "Candidate lacks essential on-premise deployment experience and hardware/software sizing expertise, making it uncertain if they can deliver the job requirements.",
+    "proposal": null
+  },
+  "6f59658a274ebe2935d9303e14673346623f4112d3f2ba3625c9d53bbf8d993f": {
+    "title": "AI voice receptionist for website - Web Development",
+    "score": 40,
+    "verdict": "Candidate has relevant ML expertise but lacks essential web development skills required for the job.",
+    "proposal": null
+  }
+}

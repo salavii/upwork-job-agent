@@ -37,12 +37,34 @@ import re
 # accidentally break our generated HTML page's structure.
 import html
 
-# `datetime` is used to stamp today's date onto the HTML report title.
+# `datetime` is used to stamp today's date onto the HTML report title,
+# and to turn each job's "date_added" string into a nicely formatted
+# section heading (e.g. "July 17, 2026").
 import datetime
 
-# The file containing multiple job postings, separated by a line with
-# just "---". See jobs.txt in this same folder for the example jobs.
-JOBS_FILE = "jobs.txt"
+# `json` is used to read jobs.json, which is now written by server.py as
+# a JSON list of job objects (see server.py's save_jobs()).
+import json
+
+# `sys` gives us access to command-line arguments (sys.argv), so this
+# file can be run as `python match_llm.py --list`, `--delete N`, or
+# `--fresh` instead of only the default scoring run.
+import sys
+
+# `hashlib` is used to turn a job's text into a short, stable ID (a
+# hash), so we can cache that job's result in results.json and recognize
+# "this is the same job I already scored" even without needing a
+# database - two identical job texts always hash to the same value.
+import hashlib
+
+# The file server.py saves scraped jobs into: a JSON list of objects
+# shaped like {"text": "...", "date_added": "YYYY-MM-DD", "saved_at": "..."}.
+JOBS_JSON_FILE = "jobs.json"
+
+# Where already-scored jobs are cached, keyed by a hash of their text, so
+# re-running this script doesn't re-call Ollama for jobs we've already
+# scored. See load_results()/save_results()/hash_job_text() below.
+RESULTS_JSON_FILE = "results.json"
 
 # Where the HTML report gets written.
 REPORT_FILE = "report.html"
@@ -372,17 +394,93 @@ def strip_proposal_preamble(raw_text):
 
 def load_jobs(file_path):
     """
-    Read `file_path` and split its contents into a list of separate job
-    posting strings, wherever a line contains just "---".
+    Read `file_path` (jobs.json, written by server.py) and return its
+    contents as a list of job dicts, each with at least "text" and
+    "date_added" keys.
 
-    Each job's leading/trailing blank lines are stripped with .strip(),
-    so the job text is clean before we hand it to score_job().
+    If the file doesn't exist yet (no jobs saved so far) or somehow
+    isn't valid JSON, we return an empty list instead of crashing.
     """
-    with open(file_path, "r", encoding="utf-8") as f:
-        file_contents = f.read()
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            jobs = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
 
-    raw_jobs = file_contents.split("---")
-    return [job.strip() for job in raw_jobs if job.strip()]
+    return jobs
+
+
+def extract_title_and_metadata(job_text):
+    """
+    Pull a short title and (if present) a metadata line out of a job's
+    raw text, for display purposes only (this doesn't affect scoring).
+
+    - Title: always just the job's first line, so both old plain-text
+      jobs (a single unbroken paragraph) and jobs captured by the
+      browser extension (title on its own first line) work the same way.
+    - Metadata: the browser extension writes job text as
+      "title\\n\\nExperience level: ... | Pricing type: ... \\n\\ndescription...".
+      If the SECOND paragraph (split on a blank line) looks like that
+      metadata line - mentioning things like "Experience level" or
+      "Hours per week" - we treat it as metadata. Older jobs that were
+      typed/pasted by hand won't have this paragraph, so metadata simply
+      comes back as None for them, which is fine.
+    """
+    stripped_text = job_text.strip()
+    title = stripped_text.splitlines()[0].strip() if stripped_text else ""
+
+    metadata = None
+    paragraphs = stripped_text.split("\n\n")
+    if len(paragraphs) > 1:
+        second_paragraph = paragraphs[1].strip()
+        if re.search(r"Experience level|Pricing type|Hours per week|Duration", second_paragraph):
+            metadata = second_paragraph
+
+    return title, metadata
+
+
+def save_jobs(jobs):
+    """
+    Write `jobs` (a list of job dicts) back to JOBS_JSON_FILE. Used by
+    --delete to persist a job's removal. We always rewrite the whole
+    file, since JSON is one big list rather than something we can
+    append/remove single lines from.
+    """
+    with open(JOBS_JSON_FILE, "w", encoding="utf-8") as f:
+        json.dump(jobs, f, indent=2, ensure_ascii=False)
+
+
+def hash_job_text(job_text):
+    """
+    Turn a job's text into a short, stable identifier (a SHA-256 hash),
+    used as its key in results.json. The same job text always produces
+    the same hash, which is exactly what we want for caching: "have I
+    already scored this exact job before?"
+    """
+    return hashlib.sha256(job_text.strip().encode("utf-8")).hexdigest()
+
+
+def load_results():
+    """
+    Read RESULTS_JSON_FILE and return its contents as a dict mapping
+    job-text hash -> cached result (title, score, verdict, proposal).
+    Returns an empty dict if the file doesn't exist yet or isn't valid
+    JSON, so a missing/corrupt cache never crashes a run - it just means
+    everything gets (re-)scored.
+    """
+    try:
+        with open(RESULTS_JSON_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_results(results):
+    """
+    Write the `results` cache dict back to RESULTS_JSON_FILE.
+    """
+    with open(RESULTS_JSON_FILE, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
 
 
 def parse_score_and_verdict(raw_reply):
@@ -409,9 +507,12 @@ def parse_score_and_verdict(raw_reply):
 def score_to_color(score):
     """
     Map a 0-100 score to a hex color for the HTML report:
-    green (>= 70), orange (50-69), red (< 50).
+    green (>= 70), orange (50-69), red (< 50). A score of None (a job
+    that hasn't been scored yet - see build_report()) gets a neutral gray.
     """
-    if score >= 70:
+    if score is None:
+        return "#888888"  # gray - not scored yet
+    elif score >= 70:
         return "#1b8a3d"  # green
     elif score >= 50:
         return "#c77700"  # orange
@@ -419,49 +520,94 @@ def score_to_color(score):
         return "#c53030"  # red
 
 
-def build_html_report(ranked_results):
+def format_date_heading(date_added):
     """
-    Build a full HTML page (as a string) showing one "card" per job,
-    ranked high to low, with the score color-coded and the drafted
-    proposal shown for high-scoring jobs.
+    Turn a "YYYY-MM-DD" string into a friendly heading like
+    "July 17, 2026". Falls back to the raw string unchanged if it's
+    missing or not in the expected format, rather than crashing the
+    whole report over one malformed date.
+    """
+    try:
+        return datetime.datetime.strptime(date_added, "%Y-%m-%d").strftime("%B %d, %Y")
+    except (ValueError, TypeError):
+        return date_added or "Unknown date"
 
-    `ranked_results` is a list of dicts, one per job, each with keys:
-    "rank", "score", "title", "verdict", "proposal" (proposal is None
-    for jobs that didn't get one drafted).
+
+def build_job_card_html(entry):
+    """
+    Build the HTML for a single job "card" (rank, color-coded score,
+    title, metadata line if present, verdict, and drafted proposal if
+    there is one).
 
     We use html.escape() on every piece of text that came from the job
     posting or the model's reply, since that text is unpredictable and
     could otherwise contain characters (like "<" or "&") that would
     break the HTML page's structure.
+
+    entry["score"] may be None for a job that hasn't been scored yet
+    (see build_report()) - shown as "Not scored yet" instead of a number.
     """
-    today_str = datetime.date.today().strftime("%B %d, %Y")
+    color = score_to_color(entry["score"])
+    score_label = "Not scored yet" if entry["score"] is None else f"{entry['score']}/100"
 
-    cards_html = ""
-    for entry in ranked_results:
-        color = score_to_color(entry["score"])
+    metadata_html = ""
+    if entry["metadata"]:
+        metadata_html = f'<p class="metadata">{html.escape(entry["metadata"])}</p>'
 
-        proposal_html = ""
-        if entry["proposal"]:
-            # Convert newlines in the proposal text to <br> so paragraph
-            # breaks show up correctly in the browser.
-            proposal_text_html = html.escape(entry["proposal"]).replace("\n", "<br>")
-            proposal_html = f"""
-            <div class="proposal-box">
-                <div class="proposal-label">Drafted proposal</div>
-                <p>{proposal_text_html}</p>
-            </div>
-            """
-
-        cards_html += f"""
-        <div class="card">
-            <div class="card-header">
-                <span class="rank">#{entry['rank']}</span>
-                <span class="score" style="color: {color};">{entry['score']}/100</span>
-            </div>
-            <h2 class="job-title">{html.escape(entry['title'])}</h2>
-            <p class="verdict">{html.escape(entry['verdict'])}</p>
-            {proposal_html}
+    proposal_html = ""
+    if entry["proposal"]:
+        # Convert newlines in the proposal text to <br> so paragraph
+        # breaks show up correctly in the browser.
+        proposal_text_html = html.escape(entry["proposal"]).replace("\n", "<br>")
+        proposal_html = f"""
+        <div class="proposal-box">
+            <div class="proposal-label">Drafted proposal</div>
+            <p>{proposal_text_html}</p>
         </div>
+        """
+
+    # data-job-id carries this job's text hash (see hash_job_text()), so
+    # the delete button's JavaScript (in build_html_report()) can tell
+    # server.py's /delete_job endpoint exactly which job to remove,
+    # without needing to send the whole job text back.
+    return f"""
+    <div class="card" data-job-id="{entry['job_id']}">
+        <div class="card-header">
+            <span class="rank">#{entry['rank']}</span>
+            <span class="score" style="color: {color};">{score_label}</span>
+        </div>
+        <h3 class="job-title">{html.escape(entry['title'])}</h3>
+        {metadata_html}
+        <p class="verdict">{html.escape(entry['verdict'])}</p>
+        {proposal_html}
+        <button class="delete-button" data-job-id="{entry['job_id']}">🗑 Delete</button>
+    </div>
+    """
+
+
+def build_html_report(results_by_date, sorted_dates):
+    """
+    Build a full HTML page (as a string), grouped into one section per
+    date (newest first), with each date's jobs shown as cards ranked
+    high-to-low by score within that section.
+
+    `results_by_date` is a dict: {"YYYY-MM-DD": [entry, entry, ...]},
+    where each entry is a dict with keys "rank", "score", "title",
+    "metadata", "verdict", "proposal" (metadata/proposal may be None).
+    `sorted_dates` is the list of those date keys, already ordered
+    newest-first - see the main block below for how both are built.
+    """
+    generated_at_str = datetime.datetime.now().strftime("%B %d, %Y at %H:%M")
+
+    sections_html = ""
+    for date_added in sorted_dates:
+        date_heading = format_date_heading(date_added)
+        cards_html = "".join(build_job_card_html(entry) for entry in results_by_date[date_added])
+        sections_html += f"""
+        <section class="date-section">
+            <h2 class="date-heading">{html.escape(date_heading)}</h2>
+            {cards_html}
+        </section>
         """
 
     return f"""<!DOCTYPE html>
@@ -470,66 +616,153 @@ def build_html_report(ranked_results):
 <meta charset="UTF-8">
 <title>Upwork Job Matches</title>
 <style>
+    * {{
+        box-sizing: border-box;
+    }}
     body {{
-        font-family: Arial, Helvetica, sans-serif;
+        font-family: "Segoe UI", Arial, Helvetica, sans-serif;
         background-color: #f4f5f7;
-        color: #222;
-        max-width: 800px;
+        color: #22262b;
+        max-width: 820px;
         margin: 40px auto;
-        padding: 0 20px;
+        padding: 0 20px 60px 20px;
+        line-height: 1.5;
+    }}
+    .page-header {{
+        margin-bottom: 32px;
     }}
     h1 {{
-        font-size: 24px;
-        margin-bottom: 24px;
+        font-size: 26px;
+        margin: 0 0 6px 0;
+    }}
+    .generated-at {{
+        font-size: 13px;
+        color: #777;
+        margin: 0;
+    }}
+    .date-section {{
+        margin-bottom: 36px;
+    }}
+    .date-heading {{
+        font-size: 18px;
+        font-weight: 600;
+        color: #333;
+        border-bottom: 2px solid #ddd;
+        padding-bottom: 8px;
+        margin-bottom: 18px;
     }}
     .card {{
         background-color: #ffffff;
-        border: 1px solid #ddd;
-        border-radius: 8px;
-        padding: 20px;
-        margin-bottom: 20px;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+        border: 1px solid #e2e2e2;
+        border-radius: 10px;
+        padding: 20px 22px;
+        margin-bottom: 16px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
     }}
     .card-header {{
         display: flex;
         justify-content: space-between;
         align-items: center;
-        font-size: 18px;
-        font-weight: bold;
+        font-size: 15px;
+        font-weight: 600;
     }}
     .rank {{
-        color: #555;
+        color: #888;
     }}
     .score {{
-        font-size: 20px;
+        font-size: 21px;
+        font-weight: 700;
     }}
     .job-title {{
         font-size: 17px;
-        margin: 10px 0 6px 0;
+        font-weight: 600;
+        margin: 10px 0 4px 0;
+    }}
+    .metadata {{
+        font-size: 13px;
+        color: #666;
+        margin: 0 0 10px 0;
     }}
     .verdict {{
         margin: 0 0 10px 0;
         color: #444;
     }}
     .proposal-box {{
-        background-color: #f9f9f9;
+        background-color: #f7f8fa;
         border-left: 4px solid #888;
-        border-radius: 4px;
+        border-radius: 6px;
         padding: 12px 16px;
         margin-top: 10px;
+        font-size: 14px;
     }}
     .proposal-label {{
-        font-size: 13px;
-        font-weight: bold;
+        font-size: 12px;
+        font-weight: 700;
         text-transform: uppercase;
+        letter-spacing: 0.03em;
         color: #666;
         margin-bottom: 6px;
+    }}
+    .delete-button {{
+        margin-top: 14px;
+        padding: 6px 12px;
+        font-size: 13px;
+        border: 1px solid #e0b4b4;
+        border-radius: 6px;
+        background-color: #fdf2f2;
+        color: #a33;
+        cursor: pointer;
+    }}
+    .delete-button:hover {{
+        background-color: #fbe4e4;
     }}
 </style>
 </head>
 <body>
-    <h1>Upwork Job Matches &mdash; {today_str}</h1>
-    {cards_html}
+    <div class="page-header">
+        <h1>Upwork Job Matches</h1>
+        <p class="generated-at">Generated {generated_at_str}</p>
+    </div>
+    {sections_html}
+
+    <script>
+        // This runs in the browser when report.html is opened. It wires
+        // up every "Delete" button to call server.py's /delete_job
+        // endpoint (server.py must be running for this to work - see
+        // the comment on DELETE_URL below).
+        const DELETE_URL = "http://localhost:8765/delete_job";
+
+        document.querySelectorAll(".delete-button").forEach(function (button) {{
+            button.addEventListener("click", function () {{
+                if (!window.confirm("Delete this job?")) {{
+                    return;
+                }}
+
+                const jobId = button.getAttribute("data-job-id");
+
+                fetch(DELETE_URL, {{
+                    method: "POST",
+                    headers: {{ "Content-Type": "application/json" }},
+                    body: JSON.stringify({{ job_id: jobId }}),
+                }})
+                    .then(function (response) {{
+                        if (!response.ok) {{
+                            throw new Error("Server responded with an error.");
+                        }}
+                        // server.py has already rebuilt report.html (with
+                        // this job gone) by the time it replies, so just
+                        // reload the page to show the fresh version -
+                        // no manual DOM surgery needed.
+                        location.reload();
+                    }})
+                    .catch(function () {{
+                        // Most likely cause: server.py isn't running, so
+                        // the fetch couldn't connect at all.
+                        alert("Start server.py to enable delete.");
+                    }});
+            }});
+        }});
+    </script>
 </body>
 </html>
 """
@@ -538,59 +771,208 @@ def build_html_report(ranked_results):
 # The `if __name__ == "__main__":` line below means: "only run this code
 # when this file is executed directly (e.g. `python match_llm.py`), not
 # when it's imported by another file."
-if __name__ == "__main__":
-    jobs = load_jobs(JOBS_FILE)
+def cli_list_jobs():
+    """
+    Handle `python match_llm.py --list`: print every job in jobs.json
+    with a 1-based index number and its title, so the user knows which
+    number to pass to --delete.
+    """
+    jobs = load_jobs(JOBS_JSON_FILE)
 
-    print(f"Loaded {len(jobs)} jobs from {JOBS_FILE}. Scoring each with {MODEL_NAME}...\n")
+    if not jobs:
+        print(f"No jobs found in {JOBS_JSON_FILE}.")
+        return
 
-    # Score every job, and keep (score, verdict, job_text) together so we
-    # can sort and print them afterwards.
-    scored_jobs = []
-    for job_text in jobs:
-        raw_reply = score_job(job_text)
-        score, verdict = parse_score_and_verdict(raw_reply)
-        scored_jobs.append((score, verdict, job_text))
+    print(f"{len(jobs)} job(s) in {JOBS_JSON_FILE}:\n")
+    for index, job in enumerate(jobs, start=1):
+        title, _ = extract_title_and_metadata(job.get("text", ""))
+        date_added = job.get("date_added", "?")
+        print(f"{index}. [{date_added}] {title}")
 
-    # Sort highest score first. key=lambda item: item[0] tells sort() to
-    # compare by the score (the first element of each tuple); reverse=True
-    # makes it descending instead of ascending.
-    scored_jobs.sort(key=lambda item: item[0], reverse=True)
 
-    print("===== Ranked Job Matches =====\n")
+def cli_delete_job(job_number):
+    """
+    Handle `python match_llm.py --delete N`: remove job number N (as
+    shown by --list) from jobs.json, and also remove its cached result
+    from results.json if one exists, so a deleted job doesn't linger in
+    either file.
+    """
+    jobs = load_jobs(JOBS_JSON_FILE)
 
-    # Collect one dict per job as we go, so we can hand the same data to
-    # build_html_report() after the terminal printing is done.
-    ranked_results = []
+    if job_number < 1 or job_number > len(jobs):
+        print(f"No job #{job_number} - there are only {len(jobs)} job(s). Use --list to see them.")
+        return
 
-    for rank, (score, verdict, job_text) in enumerate(scored_jobs, start=1):
-        # Use the job's first line as a short title in the output.
-        job_title = job_text.splitlines()[0].strip()
-        print(f"#{rank} - SCORE: {score} - {job_title}")
-        print(f"   Verdict: {verdict}")
+    # Lists are 0-indexed but we show/accept 1-based numbers to the user.
+    removed_job = jobs.pop(job_number - 1)
+    save_jobs(jobs)
 
-        # Only draft (and print) a proposal for high-scoring jobs - it's
-        # not worth writing one for a job I'm a poor fit for.
-        proposal = None
-        if score >= PROPOSAL_SCORE_THRESHOLD:
-            proposal = draft_proposal(job_text)
-            print("\n   Drafted proposal:")
-            print(f"   {proposal}")
+    title, _ = extract_title_and_metadata(removed_job.get("text", ""))
 
-        print()
+    results = load_results()
+    removed_hash = hash_job_text(removed_job.get("text", ""))
+    had_cached_result = removed_hash in results
+    if had_cached_result:
+        del results[removed_hash]
+        save_results(results)
 
-        ranked_results.append(
-            {
-                "rank": rank,
-                "score": score,
-                "title": job_title,
-                "verdict": verdict,
-                "proposal": proposal,
-            }
-        )
+    print(f"Deleted job #{job_number}: {title}")
+    if had_cached_result:
+        print("Also removed its cached result from results.json.")
 
-    # Also save the same ranking as a readable HTML report.
-    report_html = build_html_report(ranked_results)
+
+def build_report():
+    """
+    Rebuild report.html directly from the CURRENT jobs.json and cached
+    results.json, WITHOUT calling Ollama. Jobs that don't have a cached
+    result yet are shown as "Not scored yet" cards instead of being
+    scored on the spot.
+
+    This is the single source of truth for turning jobs.json + the
+    results cache into a grouped report, used both by the normal scoring
+    run below (after it finishes scoring/caching) and by server.py right
+    after a job is deleted - so report.html reflects jobs.json
+    immediately, without needing a full rescoring run.
+
+    Returns (results_by_date, sorted_dates) so callers that also want to
+    print a terminal summary (like run_scoring_and_report()) don't have
+    to rebuild the same grouping a second time.
+    """
+    jobs = load_jobs(JOBS_JSON_FILE)
+    results_cache = load_results()
+
+    # Group jobs by date_added, so today's jobs stay visually separate
+    # from older ones in the HTML report.
+    results_by_date = {}
+
+    for job in jobs:
+        job_text = job.get("text", "")
+        date_added = job.get("date_added") or "Unknown date"
+        title, metadata = extract_title_and_metadata(job_text)
+        job_hash = hash_job_text(job_text)
+
+        cached = results_cache.get(job_hash)
+        if cached:
+            score = cached["score"]
+            verdict = cached["verdict"]
+            proposal = cached.get("proposal")
+        else:
+            # No cached result for this job - show it as unscored rather
+            # than calling Ollama here (that only happens in
+            # run_scoring_and_report(), never as a side effect of
+            # rebuilding the report).
+            score = None
+            verdict = 'Not scored yet - run "python match_llm.py" to score this job.'
+            proposal = None
+
+        entry = {
+            "score": score,
+            "verdict": verdict,
+            "title": title,
+            "metadata": metadata,
+            "proposal": proposal,
+            "job_id": job_hash,  # lets the HTML report's delete button identify this job
+        }
+        results_by_date.setdefault(date_added, []).append(entry)
+
+    # Within each date, rank scored jobs highest-first; unscored jobs
+    # (score is None) sort to the bottom of their date section rather
+    # than crashing a plain numeric sort.
+    for date_added, entries in results_by_date.items():
+        entries.sort(key=lambda entry: (entry["score"] is None, -(entry["score"] or 0)))
+        for rank, entry in enumerate(entries, start=1):
+            entry["rank"] = rank
+
+    # Newest date first. "YYYY-MM-DD" strings sort correctly as plain
+    # text, so a simple reverse-sorted() is enough here.
+    sorted_dates = sorted(results_by_date.keys(), reverse=True)
+
+    report_html = build_html_report(results_by_date, sorted_dates)
     with open(REPORT_FILE, "w", encoding="utf-8") as f:
         f.write(report_html)
 
+    return results_by_date, sorted_dates
+
+
+def run_scoring_and_report(use_cache):
+    """
+    The main pipeline: score every job in jobs.json (reusing cached
+    results from results.json unless `use_cache` is False), then hand
+    off to build_report() to group everything by date, write
+    report.html, and print a terminal summary.
+    """
+    jobs = load_jobs(JOBS_JSON_FILE)
+    results_cache = load_results()
+
+    print(f"Loaded {len(jobs)} jobs from {JOBS_JSON_FILE}. Scoring each with {MODEL_NAME}...\n")
+
+    for job in jobs:
+        job_text = job.get("text", "")
+        title, _ = extract_title_and_metadata(job_text)
+        job_hash = hash_job_text(job_text)
+
+        # Reuse a cached result if we have one for this exact job text
+        # and the caller didn't ask for a fresh re-score (--fresh).
+        if use_cache and job_hash in results_cache:
+            print(f"Reused cached: {title}")
+            continue
+
+        print(f"Scoring new: {title}")
+        raw_reply = score_job(job_text)
+        score, verdict = parse_score_and_verdict(raw_reply)
+
+        # Only draft a proposal for high-scoring jobs - it's not worth
+        # spending the model's (or the client's) time on a poor fit.
+        proposal = None
+        if score >= PROPOSAL_SCORE_THRESHOLD:
+            proposal = draft_proposal(job_text)
+
+        results_cache[job_hash] = {
+            "title": title,
+            "score": score,
+            "verdict": verdict,
+            "proposal": proposal,
+        }
+
+    # Persist the (possibly updated) cache so future runs - and
+    # build_report() below - can see today's results too.
+    save_results(results_cache)
+
+    results_by_date, sorted_dates = build_report()
+
+    print("\n===== Ranked Job Matches (grouped by date) =====\n")
+    for date_added in sorted_dates:
+        print(f"--- {format_date_heading(date_added)} ---")
+        for entry in results_by_date[date_added]:
+            score_display = "Not scored yet" if entry["score"] is None else entry["score"]
+            print(f"#{entry['rank']} - SCORE: {score_display} - {entry['title']}")
+            if entry["metadata"]:
+                print(f"   {entry['metadata']}")
+            print(f"   Verdict: {entry['verdict']}")
+            if entry["proposal"]:
+                print("\n   Drafted proposal:")
+                print(f"   {entry['proposal']}")
+            print()
+        print()
+
     print(f"HTML report saved to {REPORT_FILE}")
+
+
+if __name__ == "__main__":
+    cli_args = sys.argv[1:]
+
+    if "--list" in cli_args:
+        cli_list_jobs()
+    elif "--delete" in cli_args:
+        delete_flag_index = cli_args.index("--delete")
+        try:
+            job_number_to_delete = int(cli_args[delete_flag_index + 1])
+        except (IndexError, ValueError):
+            print("Usage: python match_llm.py --delete <job number> (see --list for numbers)")
+        else:
+            cli_delete_job(job_number_to_delete)
+    else:
+        # --fresh ignores the results.json cache and re-scores every
+        # job with Ollama, regardless of whether it's been scored before.
+        use_cache = "--fresh" not in cli_args
+        run_scoring_and_report(use_cache)
