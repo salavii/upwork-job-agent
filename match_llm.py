@@ -95,7 +95,7 @@ MY_PROFILE = """[REDACTED - moved to gitignored config.json]"""
 # proposal, or vice versa).
 MY_PROJECTS_BY_DOMAIN = """[REDACTED - moved to gitignored config.json]"""
 
-# Scoring rules for the model to follow. This has gone through two
+# Scoring rules for the model to follow. This has gone through several
 # rounds of fixes:
 # - v1 just asked for "a match score" with no guidance on how strict to
 #   be, and the model came back too generous (82/100 on a job that was
@@ -105,10 +105,23 @@ MY_PROJECTS_BY_DOMAIN = """[REDACTED - moved to gitignored config.json]"""
 #   backend/infra experience") even on jobs that never asked for
 #   backend/infra at all - it was judging me against my whole profile's
 #   weaknesses instead of against what THIS job actually needs.
-# - v3 (this version) explicitly forces the model to first extract what
-#   the job actually requires, and only count a gap against me if it
-#   maps to one of those requirements. A skill I lack that the job never
-#   asked for must NOT lower the score.
+# - v3 explicitly forced the model to first extract what the job
+#   actually requires, and only count a gap against me if it maps to one
+#   of those requirements. A skill I lack that the job never asked for
+#   must NOT lower the score.
+# - v4 (this version) fixes a different failure mode: v3 still scored
+#   large, multi-skill jobs too generously in the middle (a 60/100 for a
+#   giant desktop app - 3D avatars, voice, databases, websockets,
+#   installer - where I could only realistically deliver one small
+#   slice). v3 only checked "is this skill missing?", not "how much of
+#   the WHOLE job can I actually cover?". v4 adds an explicit
+#   components-and-fraction step: break the job into its main
+#   components, judge each one, and score based on what FRACTION of the
+#   overall job I could deliver - so a perfect match on 1 of 5 unrelated
+#   components stays LOW, not "medium". It also adds a separate FLAGS
+#   step for red flags unrelated to skill match (e.g. a budget far too
+#   small for the described scope) - these are informational, not part
+#   of the skill-fit score itself.
 STRICT_SCORING_GUIDELINES = """
 Score as a STRICT freelance-fit judge, not an encouraging recruiter. Be
 skeptical: most real jobs need several different skills, and partially
@@ -122,28 +135,73 @@ Follow these steps before assigning a score:
    requirements (explicitly required/mandatory, or clearly central to
    what the job is about) versus NICE-TO-HAVE requirements (secondary
    features, bonus skills, or minor details).
-2. Compare the candidate profile only against that extracted list.
-   - A "gap" only counts if it maps to something on this list. If the
-     job never mentioned or implied a skill (e.g. backend frameworks,
-     deployment, a specific language), the candidate's lack of that
-     skill is IRRELEVANT and must NOT be listed as a gap or lower the
-     score.
-   - If the candidate is missing one or more MANDATORY/CORE items from
-     the extracted list, the score MUST drop sharply - a missing
-     essential, job-relevant skill caps the score low even if many
-     nice-to-haves match.
-3. Only after core, job-relevant requirements are covered should
-   nice-to-have matches push the score higher.
+2. Break the job down into its main COMPONENTS - the 2-6 top-level,
+   NON-OVERLAPPING skill-areas the work actually consists of (e.g. for a
+   job building a desktop app with 3D avatars, voice, a database, and an
+   installer, the components might be: "3D rendering/avatars",
+   "voice/audio", "database design", "real-time networking",
+   "installer/packaging"). Keep this to a short, high-level list (aim
+   for 3-6, never more than 8), not a granular checklist. Do NOT list
+   the same underlying skill twice under different names (e.g. don't
+   list both "mobile app development" and "iOS and Android development"
+   as separate components - that's one component, not two). Do NOT
+   create a separate component for administrative/deliverable items like
+   "documentation", "installation guide", or "configuration files" -
+   these are just paperwork attached to the OTHER technical components,
+   not a skill area of their own, and must not be counted as if they
+   were.
+3. For EACH component, judge whether the candidate profile can deliver
+   it - BE STRICT AND LITERAL:
+   - YES: that exact skill, tool, or a very close synonym of it is
+     explicitly named in the candidate profile.
+   - PARTIAL: the profile shows clearly transferable experience (e.g. a
+     different but closely related ML framework or task), even though
+     it isn't an exact match.
+   - NO: the profile does not mention it and it is not closely related
+     to anything the profile does mention.
+   Do NOT mark a component YES or PARTIAL just because it "seems like
+   something a competent engineer could figure out" or because it
+   sounds generic (common examples that must be marked NO unless
+   actually present in the profile: databases like PostgreSQL, web/app
+   frameworks, mobile development, DevOps/installers, audio/voice
+   pipelines, 3D/graphics work). If it is not in the profile, it is NO -
+   being a capable engineer in general is not the same as having the
+   specific skill this job needs.
+4. Count the components: FRACTION = (number of YES + 0.5 x number of
+   PARTIAL) / (total number of components). Compute this as an actual
+   number, do not guess or default to "about half" - a job where the
+   candidate is YES on 1 of 5 components and NO on the rest has a
+   fraction of 0.2, not 0.5.
+5. Compare the candidate profile against the MANDATORY/CORE requirements
+   from step 1 too. A "gap" only counts if it maps to something on that
+   list - a skill the job never mentioned or implied is IRRELEVANT and
+   must NOT be listed as a gap or lower the score.
 
-Use these score anchors as a guide:
-- 80-100: the candidate covers essentially all of what THIS job actually
-  requires (mandatory/core requirements included), so they could
-  realistically deliver most of it alone.
-- 40-60: the candidate covers only part of what THIS job requires -
-  some job-relevant mandatory/core requirements are weak or missing.
-- Below 40: the candidate is missing multiple job-relevant
-  mandatory/core requirements and would need significant help to
-  deliver this job.
+Use these score anchors, based on the FRACTION from step 4 (this
+overrides any temptation to give a "medium" score just because SOME
+skill matched):
+- 80-100: the candidate could deliver ALL or nearly all components
+  (roughly 90%+) mostly alone, including mandatory/core requirements.
+- 60-79: the candidate could deliver MOST components (roughly 60-90%)
+  but is missing some real ground.
+- 40-59: the candidate could deliver ABOUT HALF the components (roughly
+  40-60%) - a genuine partial fit, not just "has one relevant skill".
+- 20-39: the candidate could only deliver a SMALL SLICE of the overall
+  job (a minority of components, e.g. 1 out of 4-5, even if that one
+  slice is a strong, direct skill match) - most of the job is still
+  outside their ability to deliver alone.
+- 0-19: the candidate could deliver almost none of the job's components.
+
+Separately from the score, check for FLAGS - warning signs about the JOB
+ITSELF, independent of whether the candidate's skills match:
+- The stated budget/pay is clearly too small for the described scope
+  (e.g. a fixed price of $10-50 for a multi-month, multi-skill build).
+- The scope described is large enough that it would normally need a
+  small team or multiple specialists, not one freelancer.
+- Any other clear mismatch between what's asked for and what a single
+  freelancer could reasonably deliver in the stated timeframe/budget.
+If none of these apply, there are no flags - do not invent one just to
+have something to say.
 """
 
 # The exact format we want the model to reply in. Spelling this out in
@@ -152,13 +210,15 @@ Use these score anchors as a guide:
 # code later, if we want to extract just the score, for example.
 RESPONSE_FORMAT_INSTRUCTIONS = """
 Respond in EXACTLY this format, with nothing before or after it, and no
-markdown formatting (no asterisks, no headers). Fill in JOB REQUIRES
-FIRST, and only list a gap in GAPS if it also appears in JOB REQUIRES -
-if a candidate weakness is not in JOB REQUIRES, it must be left out of
-GAPS entirely, since the job never asked for it:
+markdown formatting (no asterisks, no headers). Fill in JOB REQUIRES and
+COMPONENTS FIRST, and only list a gap in GAPS if it also appears in JOB
+REQUIRES - if a candidate weakness is not in JOB REQUIRES, it must be
+left out of GAPS entirely, since the job never asked for it:
 
 JOB REQUIRES: <comma-separated list of what this job actually needs, mandatory items marked with (core)>
-SCORE: <a single integer from 0 to 100>
+COMPONENTS: <comma-separated list of the job's main, non-overlapping components, each followed by (yes), (partial), or (no) - be strict, see the rules above>
+DELIVERABLE FRACTION: <the actual count, e.g. "1 YES + 0 PARTIAL out of 5 components = 0.2">
+SCORE: <a single integer from 0 to 100, computed from the fraction above (fraction x 100, adjusted slightly for mandatory/core gaps)>
 STRENGTHS:
 - <strength 1>
 - <strength 2>
@@ -166,6 +226,8 @@ STRENGTHS:
 GAPS:
 - <gap - must be an item from JOB REQUIRES that the candidate lacks>
 - <gap 2 (optional, same rule)>
+FLAGS:
+- <a warning sign about the job itself, e.g. budget too low for the scope (optional - write "None" if there are no flags)>
 VERDICT: <one short sentence>
 """
 
@@ -217,7 +279,7 @@ def ask_ollama(prompt, temperature=0):
     return response_data["response"]
 
 
-def score_job(job_text):
+def score_job(job_text, temperature=0):
     """
     Ask the model to evaluate how well MY_PROFILE fits the given job
     posting (`job_text`), acting as a technical recruiter.
@@ -237,6 +299,15 @@ def score_job(job_text):
 
     Returns the model's raw reply as a string (already in the format
     described above), which we can print directly.
+
+    `temperature` defaults to 0 for the normal, deterministic case (see
+    the comment on ask_ollama() for why). run_scoring_and_report() passes
+    a small non-zero temperature for a one-time RETRY when the model's
+    first reply didn't include the (yes)/(partial)/(no) COMPONENTS
+    labels compute_score_from_components() needs - at temperature=0,
+    retrying with the exact same prompt would just reproduce the same
+    malformed reply, so the retry needs a little randomness to have any
+    chance of getting a differently-shaped (hopefully compliant) answer.
     """
     prompt = f"""You are a strict freelance-fit judge deciding whether a candidate
 should apply to a job posting. Your job is to protect the candidate's
@@ -253,9 +324,7 @@ JOB POSTING:
 {RESPONSE_FORMAT_INSTRUCTIONS}
 """
 
-    # temperature=0 so the same job scores the same way every time we
-    # run this - see the comment on ask_ollama() for why that matters.
-    return ask_ollama(prompt, temperature=0)
+    return ask_ollama(prompt, temperature=temperature)
 
 
 def draft_proposal(job_text):
@@ -504,6 +573,99 @@ def parse_score_and_verdict(raw_reply):
     return score, verdict
 
 
+def parse_flags(raw_reply):
+    """
+    Pull the bullet lines under "FLAGS:" out of a score_job() reply -
+    warning signs about the JOB ITSELF (e.g. a budget far too small for
+    the described scope), independent of the skill-fit score.
+
+    Returns a list of flag strings, or an empty list if the model wrote
+    "None" (no flags for this job) or the FLAGS section wasn't found at
+    all - either way, no flags is a perfectly normal, common result.
+    """
+    # Capture everything between "FLAGS:" and the next "VERDICT:" line
+    # (or the end of the text, if VERDICT wasn't found for some reason).
+    flags_match = re.search(r"FLAGS:\s*(.*?)(?:\n\s*VERDICT:|\Z)", raw_reply, re.DOTALL)
+    if not flags_match:
+        return []
+
+    flags = []
+    for line in flags_match.group(1).splitlines():
+        flag_text = line.strip().lstrip("-").strip()
+        if flag_text and flag_text.lower() not in ("none", "none.", "n/a"):
+            flags.append(flag_text)
+
+    return flags
+
+
+# Component names matching any of these are administrative/deliverable
+# items (documentation, installation guides, config files, etc.), not
+# real skill areas. The prompt already tells the model not to list these
+# as their own components, but an 8B model doesn't always obey that -
+# this is a code-level backstop that filters them out regardless of what
+# the model did, so a job with a long "write 5 kinds of documentation"
+# list can't inflate its component count with easy "yes" items.
+BOILERPLATE_COMPONENT_PATTERN = re.compile(
+    r"documentation|installation guide|install guide|setup guide|user guide"
+    r"|instructions|installer|readme|config(uration)? files?",
+    re.IGNORECASE,
+)
+
+
+def compute_score_from_components(raw_reply):
+    """
+    Compute the match score directly from the model's COMPONENTS
+    classification (see RESPONSE_FORMAT_INSTRUCTIONS), instead of
+    trusting the SCORE number the model wrote itself.
+
+    Why: an 8B model can classify a component as (yes)/(partial)/(no)
+    reasonably well, but is unreliable at then doing the arithmetic to
+    turn that into a percentage - in testing it sometimes wrote a
+    DELIVERABLE FRACTION calculation with the wrong answer (e.g. "1 YES
+    + 0.5x2 PARTIAL out of 12 = 0.583" when that arithmetic is actually
+    0.167), and its SCORE line inherited that wrong number. Since the
+    (yes)/(partial)/(no) labels themselves are just text we can count
+    reliably with code, we do the arithmetic ourselves instead of asking
+    the model to:
+
+        fraction = (yes_count + 0.5 * partial_count) / total_count
+        score = round(fraction * 100)
+
+    We also drop any component whose NAME matches
+    BOILERPLATE_COMPONENT_PATTERN before counting - the model sometimes
+    ignores the prompt's instruction not to list documentation/installer
+    items as their own components (and marks them an easy "yes"), which
+    would otherwise pad the fraction with components that aren't real
+    engineering work.
+
+    Returns None if no usable (non-boilerplate) "name (yes/partial/no)"
+    pairs can be found, so the caller can fall back to the model's own
+    SCORE line instead of crashing or dividing by zero.
+    """
+    components_match = re.search(r"COMPONENTS:\s*(.+)", raw_reply)
+    if not components_match:
+        return None
+
+    # Capture each "component name (yes/partial/no)" pair together, so
+    # we can filter by name before counting labels.
+    pairs = re.findall(r"([^,()]+?)\s*\((yes|partial|no)\)", components_match.group(1), re.IGNORECASE)
+    if not pairs:
+        return None
+
+    real_labels = [
+        label.lower() for name, label in pairs if not BOILERPLATE_COMPONENT_PATTERN.search(name)
+    ]
+    if not real_labels:
+        return None
+
+    yes_count = real_labels.count("yes")
+    partial_count = real_labels.count("partial")
+    total_count = len(real_labels)
+
+    fraction = (yes_count + 0.5 * partial_count) / total_count
+    return round(fraction * 100)
+
+
 def score_to_color(score):
     """
     Map a 0-100 score to a hex color for the HTML report:
@@ -554,6 +716,16 @@ def build_job_card_html(entry):
     if entry["metadata"]:
         metadata_html = f'<p class="metadata">{html.escape(entry["metadata"])}</p>'
 
+    flags_html = ""
+    if entry["flags"]:
+        flag_items_html = "".join(f"<li>{html.escape(flag)}</li>" for flag in entry["flags"])
+        flags_html = f"""
+        <div class="flags-box">
+            <div class="flags-label">⚠ Flags</div>
+            <ul>{flag_items_html}</ul>
+        </div>
+        """
+
     proposal_html = ""
     if entry["proposal"]:
         # Convert newlines in the proposal text to <br> so paragraph
@@ -579,6 +751,7 @@ def build_job_card_html(entry):
         <h3 class="job-title">{html.escape(entry['title'])}</h3>
         {metadata_html}
         <p class="verdict">{html.escape(entry['verdict'])}</p>
+        {flags_html}
         {proposal_html}
         <button class="delete-button" data-job-id="{entry['job_id']}">🗑 Delete</button>
     </div>
@@ -702,6 +875,27 @@ def build_html_report(results_by_date, sorted_dates):
         letter-spacing: 0.03em;
         color: #666;
         margin-bottom: 6px;
+    }}
+    .flags-box {{
+        background-color: #fff8e6;
+        border-left: 4px solid #d9a441;
+        border-radius: 6px;
+        padding: 10px 16px;
+        margin: 10px 0;
+        font-size: 13px;
+        color: #6b4e14;
+    }}
+    .flags-label {{
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: #8a6215;
+        margin-bottom: 4px;
+    }}
+    .flags-box ul {{
+        margin: 0;
+        padding-left: 18px;
     }}
     .delete-button {{
         margin-top: 14px;
@@ -856,6 +1050,9 @@ def build_report():
             score = cached["score"]
             verdict = cached["verdict"]
             proposal = cached.get("proposal")
+            # .get(..., []) so results cached before FLAGS existed don't
+            # crash the report - they just show no flags.
+            flags = cached.get("flags", [])
         else:
             # No cached result for this job - show it as unscored rather
             # than calling Ollama here (that only happens in
@@ -864,6 +1061,7 @@ def build_report():
             score = None
             verdict = 'Not scored yet - run "python match_llm.py" to score this job.'
             proposal = None
+            flags = []
 
         entry = {
             "score": score,
@@ -871,6 +1069,7 @@ def build_report():
             "title": title,
             "metadata": metadata,
             "proposal": proposal,
+            "flags": flags,
             "job_id": job_hash,  # lets the HTML report's delete button identify this job
         }
         results_by_date.setdefault(date_added, []).append(entry)
@@ -919,7 +1118,29 @@ def run_scoring_and_report(use_cache):
 
         print(f"Scoring new: {title}")
         raw_reply = score_job(job_text)
+        computed_score = compute_score_from_components(raw_reply)
+
+        # The model occasionally skips the (yes)/(partial)/(no) labels
+        # entirely, which leaves us nothing reliable to compute a score
+        # from. At temperature=0 a retry with the SAME prompt would just
+        # reproduce the same malformed reply, so give it one retry with
+        # a little randomness instead, purely to get a differently-shaped
+        # (hopefully compliant) answer.
+        if computed_score is None:
+            print(f"  (retrying - missing component labels: {title})")
+            raw_reply = score_job(job_text, temperature=0.2)
+            computed_score = compute_score_from_components(raw_reply)
+
         score, verdict = parse_score_and_verdict(raw_reply)
+        flags = parse_flags(raw_reply)
+
+        # Prefer the score computed deterministically from the
+        # COMPONENTS classification over the model's own (unreliable)
+        # arithmetic - see compute_score_from_components() for why.
+        # Falls back to the model's SCORE line if COMPONENTS still
+        # couldn't be parsed after the retry.
+        if computed_score is not None:
+            score = computed_score
 
         # Only draft a proposal for high-scoring jobs - it's not worth
         # spending the model's (or the client's) time on a poor fit.
@@ -932,6 +1153,7 @@ def run_scoring_and_report(use_cache):
             "score": score,
             "verdict": verdict,
             "proposal": proposal,
+            "flags": flags,
         }
 
     # Persist the (possibly updated) cache so future runs - and
@@ -949,6 +1171,8 @@ def run_scoring_and_report(use_cache):
             if entry["metadata"]:
                 print(f"   {entry['metadata']}")
             print(f"   Verdict: {entry['verdict']}")
+            if entry["flags"]:
+                print(f"   Flags: {'; '.join(entry['flags'])}")
             if entry["proposal"]:
                 print("\n   Drafted proposal:")
                 print(f"   {entry['proposal']}")

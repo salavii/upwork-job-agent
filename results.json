@@ -1,26 +1,83 @@
 {
   "972be6b1f8aa3948c96fcb684a58ee122b375e2a6641317972f74ff967fbcf7d": {
     "title": "Image-to-Vector Conversion – Machine Learning AI Model - AI & Machine Learning",
-    "score": 50,
-    "verdict": "Candidate has some relevant skills for the job, but lacks key areas such as AI model integration and Rust programming.",
-    "proposal": null
+    "score": 38,
+    "verdict": "This candidate has some relevant skills but lacks experience in vectorization app development.",
+    "proposal": null,
+    "flags": []
   },
   "79238e8c623e55291fd0c71b501793f6bd0673ae0b3768f7843f67ea66d8b47b": {
     "title": "AI & Machine Learning Developer Needed for Data Science Project - AI & Machine Learning",
-    "score": 60,
-    "verdict": "Candidate has some relevant experience but lacks essential skills for this job.",
-    "proposal": null
+    "score": 75,
+    "verdict": "This candidate is a strong fit for this job.",
+    "proposal": "I noticed that your project involves developing AI algorithms for data analysis and model development. As an experienced ML engineer with a strong background in deep learning, I'd like to highlight my relevant skills and experience in this area.\n\nWith over 3 years of hands-on experience in deep learning, I'm confident in my ability to contribute to your project. My expertise includes building and fine-tuning language models from first principles using PyTorch. Specifically, I've built a GPT-style language model from scratch in PyTorch, achieved high accuracy on spam classification tasks with fine-tuned Llama 3.2 1B, and implemented RAG pipelines for efficient processing.\n\nI'm excited to discuss how my skills can align with your project's requirements. Would you be available for a quick chat to explore the project details and see if we'd be a good fit?",
+    "flags": []
   },
   "ca6f970fd85c4cf000163dfe61add1062ee0d58752b3c091dfccfa2b1d3af561": {
     "title": "On-premise LLM/Agent/RAG deployment — technical mentor (hourly, ongoing) - DevOps & Solution Architecture",
-    "score": 40,
-    "verdict": "Candidate lacks essential on-premise deployment experience and hardware/software sizing expertise, making it uncertain if they can deliver the job requirements.",
-    "proposal": null
+    "score": 50,
+    "verdict": "The candidate's skills do not closely match the job requirements.",
+    "proposal": null,
+    "flags": []
   },
   "6f59658a274ebe2935d9303e14673346623f4112d3f2ba3625c9d53bbf8d993f": {
     "title": "AI voice receptionist for website - Web Development",
+    "score": 0,
+    "verdict": "This candidate's skills do not match the job requirements.",
+    "proposal": null,
+    "flags": [
+      "The stated budget/pay is clearly too small for the described scope."
+    ]
+  },
+  "269e955bdac9fb285b9c5cc8605ad03ecc0bcae46994569097948dbfc2f49b7d": {
+    "title": "Technical Co-Founder / Software Developer Wanted for Sports Tech Startup - Web Development",
+    "score": 33,
+    "verdict": "The candidate has some relevant skills, but lacks key areas required for the job.",
+    "proposal": null,
+    "flags": []
+  },
+  "d49bbafcf32339d37dbbd405d7104753400048da4ae0cbe275440f4b1ac8e990": {
+    "title": "AI/ML Developer Needed for End-to-End Machine Learning Solutions - AI & Machine Learning",
+    "score": 67,
+    "verdict": "The candidate has strong experience in Python and AI/ML applications, but lacks knowledge of rate limiting/retry mechanisms.",
+    "proposal": null,
+    "flags": []
+  },
+  "274045294a77d02b0d69979287108a7fffafc0a31ef377f0b36519066e36566b": {
+    "title": "AI/ML Engineer Needed for a Simple AI Assistant (MVP) - Digital Marketing",
+    "score": 20,
+    "verdict": "This candidate's skills do not match the requirements of this job, and the budget is too low for a freelancer to deliver the project.",
+    "proposal": null,
+    "flags": [
+      "Budget too low for the described scope"
+    ]
+  },
+  "9c66651d4f14cd6fef7d1f94291beda3baa6ff03004ab57d73b92bf6e671a965": {
+    "title": "Data Scientist Needed for Analysis and Modeling - Data Analysis & Testing",
+    "score": 75,
+    "verdict": "Candidate has some relevant skills, but lacks experience in model building and applied modeling.",
+    "proposal": "I see that this job posting is mainly about Data Analysis & Testing, specifically requiring skills in data science and statistics. I'll focus on my computer vision experience for this proposal.\n\nHi there,\n\nI noticed your project requires cleaning and exploring a dataset, building a relevant model (regression, classification, or clustering), summarizing findings in a report, and answering follow-up questions about the approach. Given my background in computer vision, I'd like to highlight my experience with image processing and analysis. Specifically, I've worked on projects such as ResNet-50 plant classification models, achieving a 74% validation accuracy after transfer learning, augmentation, and dropout. Additionally, I've used OpenCV for image preprocessing.\n\nI'm confident that my skills in Python (using libraries like NumPy, Pandas, and Matplotlib), along with my experience with computer vision algorithms and tools, would be a good fit for your project. If you'd like to discuss further or clarify any details about the dataset or task at hand, I'd be happy to jump on a quick call.",
+    "flags": []
+  },
+  "c2047f0b3891a2fe0482c71d5582c7d5cc78fd1e379de518a73608997213458e": {
+    "title": "Looking for Machine Learning & Automation Specialist - AI & Machine Learning",
     "score": 40,
-    "verdict": "Candidate has relevant ML expertise but lacks essential web development skills required for the job.",
-    "proposal": null
+    "verdict": "The candidate has some relevant skills, but is not a strong fit for this job.",
+    "proposal": null,
+    "flags": []
+  },
+  "8e32590028501d0d212aec3093e1c8124121a53c4635bab56c3b720d90ff135b": {
+    "title": "Machine Learning Model for Bio-Oil Yield Prediction from Biomass Feedstocks - AI & Machine Learning",
+    "score": 28,
+    "verdict": "candidate has some relevant skills but lacks key components for the job.",
+    "proposal": null,
+    "flags": []
+  },
+  "5780e819be1d4d339c1624d36e2262b0e32e9ac576e9120aafeeb6bfb1703fc9": {
+    "title": "Building AI Assistance Model System - AI & Machine Learning",
+    "score": 25,
+    "verdict": "The candidate has a strong background in machine learning, but lacks direct experience with some key components required for the job.",
+    "proposal": null,
+    "flags": []
   }
 }
