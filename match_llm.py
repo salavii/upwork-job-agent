@@ -32,9 +32,20 @@ import requests
 # the model's full raw text for each one.
 import re
 
+# `html` (standard library) escapes text like "<" and "&" into their
+# safe HTML equivalents, so job text or model output can never
+# accidentally break our generated HTML page's structure.
+import html
+
+# `datetime` is used to stamp today's date onto the HTML report title.
+import datetime
+
 # The file containing multiple job postings, separated by a line with
 # just "---". See jobs.txt in this same folder for the example jobs.
 JOBS_FILE = "jobs.txt"
+
+# Where the HTML report gets written.
+REPORT_FILE = "report.html"
 
 # Only jobs scoring at or above this get a drafted proposal - low-scoring
 # jobs aren't worth spending the client's (or the model's) time on.
@@ -50,8 +61,17 @@ MODEL_NAME = "llama3.1:8b"
 
 # My profile, as plain text. This gets pasted straight into the prompt
 # we send the model, so it has context on my background when judging
-# whether a job is a good fit.
+# whether a job is a good fit. Deliberately does NOT pre-list weaknesses
+# (e.g. "backend experience is limited") - the model is expected to infer
+# any gaps itself by comparing what a job asks for against what's
+# actually present here.
 MY_PROFILE = """[REDACTED - moved to gitignored config.json]"""
+
+# My concrete projects, grouped by domain. draft_proposal() uses this to
+# make sure it only pulls in projects that actually match the job's
+# domain (e.g. never mention an LLM project in a computer-vision
+# proposal, or vice versa).
+MY_PROJECTS_BY_DOMAIN = """[REDACTED - moved to gitignored config.json]"""
 
 # Scoring rules for the model to follow. This has gone through two
 # rounds of fixes:
@@ -227,9 +247,21 @@ def draft_proposal(job_text):
     avoid sounding stiff and robotic - a bit of randomness here is a
     feature, not a bug.
 
+    The earlier version of this prompt just said "pick whichever skills
+    are most relevant" without forcing the model to commit to a domain
+    first - so on a computer-vision job, it sometimes still mentioned
+    LLM fine-tuning, because that's an impressive-sounding item
+    elsewhere in my profile, even though it has nothing to do with the
+    job. This version fixes that by making domain classification an
+    explicit first step, and restricting the proposal to only that
+    domain's skills/projects (from MY_PROJECTS_BY_DOMAIN).
+
     The prompt asks for a short (120-160 word) proposal that:
+    - first identifies the job's domain (e.g. computer vision vs.
+      LLM/NLP vs. backend/infra), silently, before writing anything
     - opens with something specific to this job, not a generic greeting
-    - names 2-3 of my most relevant skills/projects for THIS job
+    - names 2-3 of my most relevant skills/projects for THIS job's
+      domain only - never an impressive but unrelated one
     - stays honest - never claims a skill that isn't in MY_PROFILE
     - ends with a simple call to action
     - reads like a warm, human message, not an overly formal cover letter
@@ -244,30 +276,98 @@ CANDIDATE PROFILE (this is who I am - only mention skills/experience
 that actually appear here; never invent or exaggerate anything):
 {MY_PROFILE}
 
+MY PROJECTS, GROUPED BY DOMAIN:
+{MY_PROJECTS_BY_DOMAIN}
+
 JOB POSTING:
 {job_text}
+
+Before writing anything, decide which ONE domain this job is mainly
+about (for example: computer vision, LLM/NLP, or backend/infra). Then
+write the proposal using ONLY skills and projects from that matching
+domain above. Do not mention skills or projects from a different,
+unrelated domain, even if they sound impressive - e.g. never mention
+LLM/NLP work (GPT from scratch, LoRA, RAG, Hugging Face) in a
+computer-vision proposal, and never mention computer-vision work
+(ResNet, CNNs, EuroSAT, plant classification) in an LLM/NLP proposal.
 
 Write a proposal that:
 - Is 120-160 words long.
 - Opens by addressing the client's specific need described in the job
   posting - not a generic "I am excited to apply" opener.
-- Names 2-3 of my most relevant skills or projects FOR THIS SPECIFIC JOB
-  (pick whichever items from my profile are most relevant to this job,
-  not just a random list).
+- Names 2-3 of my most relevant skills or projects FOR THIS SPECIFIC
+  JOB'S DOMAIN ONLY (see the domain rule above).
 - Is completely honest - do NOT claim any skill, tool, or experience
-  that isn't in my profile above.
+  that isn't in my profile or projects above.
 - Ends with a simple, low-pressure call to action (e.g. inviting a
   quick chat or asking a clarifying question).
 - Sounds human and warm, like a real person wrote it - not robotic,
   not overly formal, no corporate buzzwords.
 
 Respond with ONLY the proposal text itself - no preamble, no headers,
-no notes about word count.
+no notes about word count or which domain you picked.
 """
 
     # temperature=0.7 (higher than scoring) so the writing sounds natural
     # instead of terse/robotic - see the docstring above for why.
-    return ask_ollama(prompt, temperature=0.7)
+    raw_reply = ask_ollama(prompt, temperature=0.7)
+
+    # The prompt above already asks for no preamble, but an 8B model
+    # doesn't always obey that - strip_proposal_preamble() is the
+    # reliable guarantee, on top of (not instead of) the prompt instruction.
+    return strip_proposal_preamble(raw_reply)
+
+
+# A small set of phrases that signal the model is narrating ABOUT the
+# proposal ("Here is the proposal:", "Sure, I'd be happy to help...")
+# rather than writing the proposal itself. Only used to recognize
+# leading paragraphs to remove - see strip_proposal_preamble() below.
+PREAMBLE_PATTERNS = [
+    r"^here'?s?\s+(is\s+)?(the|your|my)?\s*proposal",
+    r"^here'?s my attempt",
+    r"^i'?d be happy to help",
+    r"^sure[,!]",
+    r"^okay,?\s",
+    r"^based on the job posting",
+    r"^let me (write|draft)",
+]
+
+
+def strip_proposal_preamble(raw_text):
+    """
+    Remove any leading narration the model added before the actual
+    proposal (e.g. "Here is the proposal:" or "I'd be happy to help...
+    Here's my attempt..."), as a reliable backstop for when the model
+    ignores the "no preamble" instruction in the prompt.
+
+    How it works:
+    - Split the reply into paragraphs, wherever there's a blank line.
+    - Look at paragraphs from the top. If a paragraph's text matches one
+      of the PREAMBLE_PATTERNS above (the model talking ABOUT the
+      proposal, not writing it), drop that paragraph and check the next
+      one the same way.
+    - Stop as soon as we reach a paragraph that does NOT match a
+      preamble pattern - that's where the real proposal starts, and we
+      leave everything from there onward untouched.
+
+    This only ever removes paragraphs from the very top of the reply,
+    and only ones that match a known lead-in phrase, so real proposal
+    content (which won't match these patterns) is never at risk of
+    being deleted.
+    """
+    paragraphs = raw_text.strip().split("\n\n")
+
+    while len(paragraphs) > 1:
+        first_paragraph = paragraphs[0].strip()
+        looks_like_preamble = any(
+            re.match(pattern, first_paragraph, re.IGNORECASE) for pattern in PREAMBLE_PATTERNS
+        )
+        if looks_like_preamble:
+            paragraphs.pop(0)
+        else:
+            break
+
+    return "\n\n".join(paragraphs).strip()
 
 
 def load_jobs(file_path):
@@ -306,6 +406,135 @@ def parse_score_and_verdict(raw_reply):
     return score, verdict
 
 
+def score_to_color(score):
+    """
+    Map a 0-100 score to a hex color for the HTML report:
+    green (>= 70), orange (50-69), red (< 50).
+    """
+    if score >= 70:
+        return "#1b8a3d"  # green
+    elif score >= 50:
+        return "#c77700"  # orange
+    else:
+        return "#c53030"  # red
+
+
+def build_html_report(ranked_results):
+    """
+    Build a full HTML page (as a string) showing one "card" per job,
+    ranked high to low, with the score color-coded and the drafted
+    proposal shown for high-scoring jobs.
+
+    `ranked_results` is a list of dicts, one per job, each with keys:
+    "rank", "score", "title", "verdict", "proposal" (proposal is None
+    for jobs that didn't get one drafted).
+
+    We use html.escape() on every piece of text that came from the job
+    posting or the model's reply, since that text is unpredictable and
+    could otherwise contain characters (like "<" or "&") that would
+    break the HTML page's structure.
+    """
+    today_str = datetime.date.today().strftime("%B %d, %Y")
+
+    cards_html = ""
+    for entry in ranked_results:
+        color = score_to_color(entry["score"])
+
+        proposal_html = ""
+        if entry["proposal"]:
+            # Convert newlines in the proposal text to <br> so paragraph
+            # breaks show up correctly in the browser.
+            proposal_text_html = html.escape(entry["proposal"]).replace("\n", "<br>")
+            proposal_html = f"""
+            <div class="proposal-box">
+                <div class="proposal-label">Drafted proposal</div>
+                <p>{proposal_text_html}</p>
+            </div>
+            """
+
+        cards_html += f"""
+        <div class="card">
+            <div class="card-header">
+                <span class="rank">#{entry['rank']}</span>
+                <span class="score" style="color: {color};">{entry['score']}/100</span>
+            </div>
+            <h2 class="job-title">{html.escape(entry['title'])}</h2>
+            <p class="verdict">{html.escape(entry['verdict'])}</p>
+            {proposal_html}
+        </div>
+        """
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Upwork Job Matches</title>
+<style>
+    body {{
+        font-family: Arial, Helvetica, sans-serif;
+        background-color: #f4f5f7;
+        color: #222;
+        max-width: 800px;
+        margin: 40px auto;
+        padding: 0 20px;
+    }}
+    h1 {{
+        font-size: 24px;
+        margin-bottom: 24px;
+    }}
+    .card {{
+        background-color: #ffffff;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 20px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    }}
+    .card-header {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 18px;
+        font-weight: bold;
+    }}
+    .rank {{
+        color: #555;
+    }}
+    .score {{
+        font-size: 20px;
+    }}
+    .job-title {{
+        font-size: 17px;
+        margin: 10px 0 6px 0;
+    }}
+    .verdict {{
+        margin: 0 0 10px 0;
+        color: #444;
+    }}
+    .proposal-box {{
+        background-color: #f9f9f9;
+        border-left: 4px solid #888;
+        border-radius: 4px;
+        padding: 12px 16px;
+        margin-top: 10px;
+    }}
+    .proposal-label {{
+        font-size: 13px;
+        font-weight: bold;
+        text-transform: uppercase;
+        color: #666;
+        margin-bottom: 6px;
+    }}
+</style>
+</head>
+<body>
+    <h1>Upwork Job Matches &mdash; {today_str}</h1>
+    {cards_html}
+</body>
+</html>
+"""
+
+
 # The `if __name__ == "__main__":` line below means: "only run this code
 # when this file is executed directly (e.g. `python match_llm.py`), not
 # when it's imported by another file."
@@ -328,6 +557,11 @@ if __name__ == "__main__":
     scored_jobs.sort(key=lambda item: item[0], reverse=True)
 
     print("===== Ranked Job Matches =====\n")
+
+    # Collect one dict per job as we go, so we can hand the same data to
+    # build_html_report() after the terminal printing is done.
+    ranked_results = []
+
     for rank, (score, verdict, job_text) in enumerate(scored_jobs, start=1):
         # Use the job's first line as a short title in the output.
         job_title = job_text.splitlines()[0].strip()
@@ -336,9 +570,27 @@ if __name__ == "__main__":
 
         # Only draft (and print) a proposal for high-scoring jobs - it's
         # not worth writing one for a job I'm a poor fit for.
+        proposal = None
         if score >= PROPOSAL_SCORE_THRESHOLD:
             proposal = draft_proposal(job_text)
             print("\n   Drafted proposal:")
             print(f"   {proposal}")
 
         print()
+
+        ranked_results.append(
+            {
+                "rank": rank,
+                "score": score,
+                "title": job_title,
+                "verdict": verdict,
+                "proposal": proposal,
+            }
+        )
+
+    # Also save the same ranking as a readable HTML report.
+    report_html = build_html_report(ranked_results)
+    with open(REPORT_FILE, "w", encoding="utf-8") as f:
+        f.write(report_html)
+
+    print(f"HTML report saved to {REPORT_FILE}")
