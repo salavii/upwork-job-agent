@@ -1,0 +1,12 @@
+[
+  {
+    "text": "Machine Learning Engineer for Document Q&A System\n\nExperience level: Intermediate | Pricing type: Hourly | Duration: 1 to 3 months | Hours per week: 20 hrs/week\n\nSummary\n\nWe need an ML engineer to build a Retrieval-Augmented Generation (RAG) pipeline over a set of internal PDF documents. Must know Python and Hugging Face Transformers. Experience with vector databases is a plus.\n\nSkills: Python, RAG, Hugging Face Transformers, NLP",
+    "date_added": "2026-01-01",
+    "saved_at": "2026-01-01T09:15:00"
+  },
+  {
+    "text": "Computer Vision Engineer - Product Image Classifier\n\nExperience level: Entry level | Pricing type: Fixed-price\n\nSummary\n\nLooking for someone to train a CNN model that classifies product photos into categories for an e-commerce catalog. Must know Python and PyTorch. A labeled dataset of ~20k images will be provided.\n\nSkills: Python, PyTorch, Computer Vision, CNN",
+    "date_added": "2026-01-02",
+    "saved_at": "2026-01-02T14:30:00"
+  }
+]

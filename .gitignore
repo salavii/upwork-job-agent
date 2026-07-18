@@ -1,2 +1,18 @@
+# Python
 __pycache__/
 *.pyc
+
+# Private job data and generated output - not meant to be shared/committed.
+# See jobs.example.json for the expected shape of jobs.json.
+jobs.json
+results.json
+report.html
+
+# Old plain-text job log format (superseded by jobs.json), in case it
+# still exists locally from an earlier version of this project.
+jobs.txt
+
+# Local/env files
+.env
+*.local
+.claude/settings.local.json
