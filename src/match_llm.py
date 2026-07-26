@@ -1030,11 +1030,51 @@ def save_job_list(job_list):
         json.dump(job_list, f, indent=2, ensure_ascii=False)
 
 
+def dedupe_job_list_by_url(current_jobs):
+    """
+    Collapse any entries in `current_jobs` (JOB_LIST_FILE's "jobs" dict)
+    that share the same non-empty "url" down to a single entry - the
+    highest-scoring one. Mutates `current_jobs` in place and returns how
+    many entries were dropped.
+
+    Why this exists: the normalized title+company dedup key (see
+    sources.normalize_company_title_key()) missed a real duplicate - the
+    same Himalayas posting was fetched once with company "name" (a stale
+    placeholder from earlier testing) and once with the real company
+    "Featherless AI", producing two different keys AND two different
+    exact-text hashes for the same job (also scored differently - 75 vs
+    90 - across the two fetches, since the local 8B model isn't fully
+    consistent run-to-run; the gates/prompt are unchanged, that's just
+    inherent model noise, worth knowing about but not something dedup
+    can fix). A job's URL is a far more reliable "is this the same
+    posting" signal than its title/company text, so this is checked
+    independently as a second dedup pass.
+    """
+    best_hash_by_url = {}
+    for job_hash, entry in current_jobs.items():
+        url = entry.get("url")
+        if not url:
+            continue
+        current_best = best_hash_by_url.get(url)
+        if current_best is None or entry["score"] > current_jobs[current_best]["score"]:
+            best_hash_by_url[url] = job_hash
+
+    hashes_to_drop = [
+        job_hash
+        for job_hash, entry in current_jobs.items()
+        if entry.get("url") and best_hash_by_url[entry["url"]] != job_hash
+    ]
+    for job_hash in hashes_to_drop:
+        del current_jobs[job_hash]
+
+    return len(hashes_to_drop)
+
+
 def update_persistent_job_list():
     """
     Add newly-qualifying automatically-sourced jobs to the persistent
     JOB_LIST_FILE and save it. Called once per --daily run, after
-    scoring. Returns (job_list, added_count).
+    scoring. Returns (job_list, added_count, deduped_count).
 
     A job earns a spot in the list if ALL of:
     - it came from an automatic source (has "freshness" - the manual
@@ -1048,12 +1088,16 @@ def update_persistent_job_list():
       apply_score_adjustments(), so this should never independently
       change the outcome, but checking it explicitly costs nothing and
       guards against the threshold being tuned down later).
+    - its URL isn't already covered by a higher (or equally) scoring
+      entry already in the list (see dedupe_job_list_by_url() above) -
+      if it scores HIGHER than the existing entry for that same URL,
+      the existing one is replaced rather than listing both.
 
     Once added, a job's hash stays in the list PERMANENTLY across runs -
-    this function never removes anything (that's cli_run_daily's caller
-    via server.py's /remove_daily_job and /clear_daily_list) - and a
-    hash already in "removed_hashes" (a job you deleted before) is never
-    re-added, even if a later fetch re-discovers the same posting.
+    this function never removes anything else (that's cli_run_daily's
+    caller via server.py's /remove_daily_job and /clear_daily_list) - and
+    a hash already in "removed_hashes" (a job you deleted before) is
+    never re-added, even if a later fetch re-discovers the same posting.
     """
     jobs = load_jobs(JOBS_JSON_FILE)
     results = load_results()
@@ -1061,6 +1105,12 @@ def update_persistent_job_list():
 
     removed_hashes = set(job_list["removed_hashes"])
     current_jobs = job_list["jobs"]
+
+    # Retroactively clean up any URL duplicates already in the list
+    # (e.g. from before this fix existed) before considering new jobs.
+    deduped_count = dedupe_job_list_by_url(current_jobs)
+
+    url_to_hash = {entry["url"]: h for h, entry in current_jobs.items() if entry.get("url")}
 
     added = 0
     for job in jobs:
@@ -1080,20 +1130,29 @@ def update_persistent_job_list():
         if cached["score"] <= FIT_SCORE_THRESHOLD or role_type_mismatch(title):
             continue
 
+        url = job.get("url", "")
+        existing_hash = url_to_hash.get(url) if url else None
+        if existing_hash is not None:
+            if cached["score"] <= current_jobs[existing_hash]["score"]:
+                continue  # same posting, already covered by an equal-or-better entry
+            del current_jobs[existing_hash]  # same posting, but this one scored higher - replace it
+
         current_jobs[job_hash] = {
             "title": title,
             "score": cached["score"],
             "verdict": cached["verdict"],
             "flags": cached.get("flags", []),
             "source": job.get("source", "upwork-extension"),
-            "url": job.get("url", ""),
+            "url": url,
             "date_posted": job.get("date_added", ""),
             "date_found": datetime.datetime.now().isoformat(timespec="seconds"),
         }
+        if url:
+            url_to_hash[url] = job_hash
         added += 1
 
     save_job_list(job_list)
-    return job_list, added
+    return job_list, added, deduped_count
 
 
 def save_results(results):
@@ -1620,11 +1679,11 @@ def build_daily_report_html(jobs_dict):
     ACCUMULATES across every --daily run rather than being regenerated
     from scratch - see the module-level comment on JOB_LIST_FILE.
 
-    Sorted newest-FOUND-first (not by score) - `date_found` is always a
-    precise timestamp (unlike `date_posted`, which some sources don't
-    provide), so it's the reliable way to show "what showed up most
-    recently in your list." Score is still shown prominently on every
-    card so you can judge fit at a glance regardless of ordering.
+    Sorted highest-SCORE-first, always - that's the whole point of a fit
+    list. Ties are broken by newest-found-first (`date_found` is always a
+    precise timestamp, unlike `date_posted`, which some sources don't
+    provide), just so equally-scored jobs have a stable, sensible order
+    rather than whatever order the dict happened to iterate in.
 
     Each card has a "Remove" (x) button (server.py's /remove_daily_job)
     that permanently deletes it from JOB_LIST_FILE, and the page has one
@@ -1634,7 +1693,11 @@ def build_daily_report_html(jobs_dict):
     """
     generated_at_str = datetime.datetime.now().strftime("%B %d, %Y at %H:%M")
 
+    # Sort by the tie-breaker FIRST, then by score - Python's sort is
+    # stable, so ties in score keep the newest-found-first order from
+    # this first pass instead of an arbitrary one.
     sorted_items = sorted(jobs_dict.items(), key=lambda item: item[1].get("date_found", ""), reverse=True)
+    sorted_items.sort(key=lambda item: item[1]["score"], reverse=True)
 
     if sorted_items:
         cards_html = "".join(build_daily_job_card_html(job_hash, entry) for job_hash, entry in sorted_items)
@@ -1946,16 +2009,18 @@ def cli_run_daily():
     run_scoring_and_report(use_cache=True, draft_proposals=False)
 
     print("\n=== Step 3/4: updating your persistent job list ===")
-    job_list, added = update_persistent_job_list()
+    job_list, added, deduped = update_persistent_job_list()
     print(f"Added {added} newly-qualifying job(s) (score > {FIT_SCORE_THRESHOLD}, real ML/AI engineering fit).")
+    if deduped:
+        print(f"Removed {deduped} duplicate(s) that shared a URL with another entry (kept the higher-scoring one).")
 
     print("\n=== Step 4/4: writing daily_report.html ===")
     rebuild_daily_report()
 
     total = len(job_list["jobs"])
-    print(f"\n===== Your job list: {total} job(s) (see {DAILY_REPORT_FILE}) =====")
-    top_by_date = sorted(job_list["jobs"].values(), key=lambda entry: entry.get("date_found", ""), reverse=True)
-    for entry in top_by_date[: max(added, 5)]:
+    print(f"\n===== Your job list: {total} job(s), highest score first (see {DAILY_REPORT_FILE}) =====")
+    by_score = sorted(job_list["jobs"].values(), key=lambda entry: entry["score"], reverse=True)
+    for entry in by_score:
         print(f"[{entry['score']}/100] {entry['title']}  ({entry['source']})")
         if entry["url"]:
             print(f"   {entry['url']}")
