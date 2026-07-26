@@ -51,6 +51,11 @@ import json
 # `--fresh` instead of only the default scoring run.
 import sys
 
+# `os` is used to read cloud LLM API keys from environment variables
+# (ANTHROPIC_API_KEY / OPENAI_API_KEY) - never from config.json or
+# anywhere else in the codebase, so a key can never end up committed.
+import os
+
 # `hashlib` is used to turn a job's text into a short, stable ID (a
 # hash), so we can cache that job's result in results.json and recognize
 # "this is the same job I already scored" even without needing a
@@ -307,32 +312,29 @@ def apply_score_adjustments(score, domain_fit, title, job_text):
 # the fixed port number Ollama always uses by default.
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
-# The name of the model we want Ollama to use. This must match a model
-# you've already pulled locally (check with `ollama list` in a terminal).
-MODEL_NAME = "llama3.1:8b"
-
 # Your profile lives in CONFIG_FILE, NOT hardcoded here - see
-# load_profile_config() below. This keeps personal data (real name,
-# employer, background) out of the codebase, so this repo can be shared/
-# forked without leaking anyone's resume - see config.example.json for
-# the expected shape.
+# load_config()/load_profile_config() below. This keeps personal data
+# (real name, employer, background) out of the codebase, so this repo
+# can be shared/forked without leaking anyone's resume - see
+# config.example.json for the expected shape.
 CONFIG_FILE = "config.json"
 CONFIG_EXAMPLE_FILE = "config.example.json"
 
 
-def load_profile_config():
+def load_config():
     """
-    Load ("my_profile", "my_projects_by_domain") from CONFIG_FILE.
+    Read and parse CONFIG_FILE once - both load_profile_config() and
+    resolve_llm_provider() below derive their settings from this same
+    dict, so config.json is only ever opened a single time per run.
 
     Exits with a clear, actionable message (never a raw traceback) if
-    CONFIG_FILE is missing, isn't valid JSON, or is missing a required
-    key - there's no sane default profile to fall back to, and every
-    scoring/proposal call needs one. The fix is always the same: copy
-    CONFIG_EXAMPLE_FILE to CONFIG_FILE and fill in your own background.
+    CONFIG_FILE is missing or isn't valid JSON. The fix is always the
+    same: copy CONFIG_EXAMPLE_FILE to CONFIG_FILE and fill in your own
+    background.
     """
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            config = json.load(f)
+            return json.load(f)
     except FileNotFoundError:
         print(f"ERROR: {CONFIG_FILE} not found.")
         print(f"Copy {CONFIG_EXAMPLE_FILE} to {CONFIG_FILE} and fill in your own profile:")
@@ -342,6 +344,14 @@ def load_profile_config():
         print(f"ERROR: {CONFIG_FILE} is not valid JSON: {error}")
         sys.exit(1)
 
+
+def load_profile_config(config):
+    """
+    Pull ("my_profile", "my_projects_by_domain") out of the parsed
+    config dict (see load_config()). Exits with a clear message if
+    either required key is missing - there's no sane default profile to
+    fall back to, and every scoring/proposal call needs one.
+    """
     try:
         return config["my_profile"], config["my_projects_by_domain"]
     except KeyError as error:
@@ -350,6 +360,85 @@ def load_profile_config():
         sys.exit(1)
 
 
+# ============================================================
+# LLM provider selection - config.json's OPTIONAL "llm_provider"/
+# "llm_model" fields let scoring run against a cloud LLM (Anthropic
+# Claude or OpenAI GPT) instead of the free local Ollama default, for
+# more accurate scoring at a small per-run cost. See ask_llm() below for
+# the actual dispatch - score_job()/draft_proposal() call ONLY ask_llm(),
+# never a provider-specific function directly, so the scoring logic,
+# prompts, gates, and output format are 100% identical regardless of
+# which provider answers the prompt.
+# ============================================================
+
+DEFAULT_LLM_PROVIDER = "ollama"
+DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
+DEFAULT_OPENAI_MODEL = "gpt-4o"
+
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_API_VERSION = "2023-06-01"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+
+# Cloud replies need an explicit token cap (Ollama's /api/generate has no
+# such requirement). Our replies are a compact structured block (scoring)
+# or a 120-160 word proposal - 1500 tokens is comfortable headroom for
+# either without being an invitation for a runaway/expensive reply.
+CLOUD_LLM_MAX_TOKENS = 1500
+
+
+def _default_model_for(provider):
+    return {
+        "ollama": DEFAULT_OLLAMA_MODEL,
+        "anthropic": DEFAULT_ANTHROPIC_MODEL,
+        "openai": DEFAULT_OPENAI_MODEL,
+    }.get(provider, DEFAULT_OLLAMA_MODEL)
+
+
+def resolve_llm_provider(config):
+    """
+    Decide which provider/model this run actually uses, applying the
+    "never crash, always fall back to the free local default" rule: if
+    config.json asks for a cloud provider but the matching API key
+    environment variable (ANTHROPIC_API_KEY / OPENAI_API_KEY) isn't set,
+    or "llm_provider" is some unrecognized value, print a clear warning
+    and use Ollama instead rather than failing the whole run. API keys
+    are read ONLY from the environment, never from config.json or
+    anywhere else in the codebase - so a key is never at risk of being
+    committed.
+    """
+    provider = config.get("llm_provider", DEFAULT_LLM_PROVIDER)
+    model = config.get("llm_model") or _default_model_for(provider)
+
+    if provider == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
+        print(
+            'WARNING: config.json sets llm_provider to "anthropic" but the '
+            "ANTHROPIC_API_KEY environment variable is not set. Falling back "
+            "to the local Ollama model instead."
+        )
+        return DEFAULT_LLM_PROVIDER, DEFAULT_OLLAMA_MODEL
+
+    if provider == "openai" and not os.environ.get("OPENAI_API_KEY"):
+        print(
+            'WARNING: config.json sets llm_provider to "openai" but the '
+            "OPENAI_API_KEY environment variable is not set. Falling back "
+            "to the local Ollama model instead."
+        )
+        return DEFAULT_LLM_PROVIDER, DEFAULT_OLLAMA_MODEL
+
+    if provider not in ("ollama", "anthropic", "openai"):
+        print(
+            f'WARNING: config.json\'s llm_provider "{provider}" is not '
+            'recognized (expected "ollama", "anthropic", or "openai") - '
+            "falling back to Ollama."
+        )
+        return DEFAULT_LLM_PROVIDER, DEFAULT_OLLAMA_MODEL
+
+    return provider, model
+
+
+_config = load_config()
+
 # My profile and my concrete projects grouped by domain, as plain text -
 # loaded from CONFIG_FILE (see load_profile_config() above). MY_PROFILE
 # gets pasted straight into the scoring prompt so the model has context
@@ -357,7 +446,12 @@ def load_profile_config():
 # to make sure it only pulls in projects that actually match the job's
 # domain (e.g. never mention an LLM project in a computer-vision
 # proposal, or vice versa).
-MY_PROFILE, MY_PROJECTS_BY_DOMAIN = load_profile_config()
+MY_PROFILE, MY_PROJECTS_BY_DOMAIN = load_profile_config(_config)
+
+# Which LLM backend/model this run actually uses (see resolve_llm_provider()
+# above) - MODEL_NAME is used both by ask_llm()'s dispatch and in terminal
+# messages ("Scoring each with {MODEL_NAME}...") regardless of provider.
+LLM_PROVIDER, MODEL_NAME = resolve_llm_provider(_config)
 
 # Scoring rules for the model to follow. This has gone through several
 # rounds of fixes:
@@ -581,6 +675,73 @@ def ask_ollama(prompt, temperature=0):
     return response_data["response"]
 
 
+def ask_anthropic(prompt, temperature=0):
+    """
+    Send `prompt` to the Anthropic Messages API (Claude) and return the
+    reply text. Only ever called when LLM_PROVIDER is "anthropic", which
+    resolve_llm_provider() only sets after confirming ANTHROPIC_API_KEY
+    is present - so this doesn't need to re-check for the key itself.
+
+    Uses `requests` directly (the one dependency this project already
+    has) rather than adding the anthropic SDK as a second dependency,
+    same reasoning as the raw HTTP call to Ollama above.
+    """
+    response = requests.post(
+        ANTHROPIC_API_URL,
+        headers={
+            "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+            "anthropic-version": ANTHROPIC_API_VERSION,
+            "content-type": "application/json",
+        },
+        json={
+            "model": MODEL_NAME,
+            "max_tokens": CLOUD_LLM_MAX_TOKENS,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+    )
+    response.raise_for_status()
+    return response.json()["content"][0]["text"]
+
+
+def ask_openai(prompt, temperature=0):
+    """
+    Send `prompt` to the OpenAI Chat Completions API (GPT) and return
+    the reply text. Only ever called when LLM_PROVIDER is "openai",
+    which resolve_llm_provider() only sets after confirming
+    OPENAI_API_KEY is present.
+    """
+    response = requests.post(
+        OPENAI_API_URL,
+        headers={
+            "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": MODEL_NAME,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        },
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
+
+
+def ask_llm(prompt, temperature=0):
+    """
+    Send `prompt` to whichever LLM provider config.json selects (see
+    resolve_llm_provider()) and return its text reply. This is the ONLY
+    function score_job()/draft_proposal() call - swapping providers
+    means changing config.json, never touching scoring logic, prompts,
+    gates, or output format.
+    """
+    if LLM_PROVIDER == "anthropic":
+        return ask_anthropic(prompt, temperature=temperature)
+    if LLM_PROVIDER == "openai":
+        return ask_openai(prompt, temperature=temperature)
+    return ask_ollama(prompt, temperature=temperature)
+
+
 def score_job(job_text, temperature=0):
     """
     Ask the model to evaluate how well MY_PROFILE fits the given job
@@ -626,7 +787,7 @@ JOB POSTING:
 {RESPONSE_FORMAT_INSTRUCTIONS}
 """
 
-    return ask_ollama(prompt, temperature=temperature)
+    return ask_llm(prompt, temperature=temperature)
 
 
 def draft_proposal(job_text):
@@ -703,7 +864,7 @@ no notes about word count or which domain you picked.
 
     # temperature=0.7 (higher than scoring) so the writing sounds natural
     # instead of terse/robotic - see the docstring above for why.
-    raw_reply = ask_ollama(prompt, temperature=0.7)
+    raw_reply = ask_llm(prompt, temperature=0.7)
 
     # The prompt above already asks for no preamble, but an 8B model
     # doesn't always obey that - strip_proposal_preamble() is the
