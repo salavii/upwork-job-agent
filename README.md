@@ -196,11 +196,11 @@ never crash the run over a console codepage mismatch, checks whether
 Ollama is responding and starts it if not, and appends everything with
 timestamps to `daily_run_log.txt`.
 
-To schedule it 3x/day (9am, 2pm, 7pm):
+To schedule it 3x/day (11am, 4pm, 10pm):
 ```
-schtasks /create /tn "MLJobAgent_Daily_9AM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 09:00 /f
-schtasks /create /tn "MLJobAgent_Daily_2PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 14:00 /f
-schtasks /create /tn "MLJobAgent_Daily_7PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 19:00 /f
+schtasks /create /tn "MLJobAgent_Daily_11AM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 11:00 /f
+schtasks /create /tn "MLJobAgent_Daily_4PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 16:00 /f
+schtasks /create /tn "MLJobAgent_Daily_10PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 22:00 /f
 ```
 Useful follow-ups: `schtasks /query /tn "..." /fo LIST /v` (check status),
 `schtasks /run /tn "..."` (trigger immediately, for testing),
