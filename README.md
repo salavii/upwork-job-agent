@@ -130,6 +130,44 @@ All of these constants (`ROLE_TYPE_MISMATCH_PATTERN`,
 the result of iterating against real, messy job-board data, not a fixed
 design.
 
+## LLM provider: free local, or paid cloud for more accuracy
+
+By default, scoring runs entirely on your own machine via
+**[Ollama](https://ollama.com)** — free, private (nothing leaves your
+computer), and the local 8B model is what all the gates above were built
+to compensate for. You can optionally point scoring at a cloud LLM
+(**Anthropic Claude** or **OpenAI GPT**) instead, which reasons about job
+fit noticeably better than a local 8B model out of the box — at the cost
+of a small per-run API charge and your job descriptions/profile being
+sent to that provider.
+
+Set it in `config.json`:
+```json
+{
+  "llm_provider": "ollama",
+  "llm_model": "llama3.1:8b"
+}
+```
+To switch to a cloud provider, change `llm_provider` to `"anthropic"` or
+`"openai"`, set `llm_model` to a model of theirs (e.g.
+`"claude-sonnet-4-5"` or `"gpt-4o"`), and set the matching API key as an
+**environment variable** — never in `config.json` or anywhere else in
+the repo:
+```
+# Windows (PowerShell)
+$env:ANTHROPIC_API_KEY = "sk-ant-..."
+# macOS/Linux
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+(`OPENAI_API_KEY` for `"openai"`.) If `llm_provider` is set to a cloud
+provider but the matching environment variable isn't set when you run
+the tool, it prints a clear warning and automatically falls back to the
+free local Ollama model — a missing key never crashes a run.
+
+Scoring logic, prompts, gates, and output are byte-for-byte identical
+regardless of provider — swapping providers only changes which API
+answers the same prompt (see `ask_llm()` in `src/match_llm.py`).
+
 ## Setup
 
 **1. Install [Ollama](https://ollama.com) and pull the model:**
@@ -286,7 +324,9 @@ yourself.
 - **[requests](https://pypi.org/project/requests/)** — the one external
   dependency, used to call Ollama's local API and the job-board APIs.
 - **[Ollama](https://ollama.com)** running **llama3.1:8b** locally for
-  scoring and proposal drafting — nothing sent to any external LLM API.
+  scoring and proposal drafting by default — nothing sent to any
+  external LLM API unless you opt into a cloud provider (see [LLM
+  provider](#llm-provider-free-local-or-paid-cloud-for-more-accuracy)).
 - **Chrome Extension, Manifest V3** — vanilla JavaScript, no build step.
 - **Generated HTML report** — inline CSS and vanilla JS, no external
   libraries or CDN dependencies.
