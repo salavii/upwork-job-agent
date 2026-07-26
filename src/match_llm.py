@@ -5,8 +5,8 @@ Step 2 of the Upwork job-scoring agent: LLM-based scoring.
 
 What this script does:
 - Connects to a locally running Ollama server (see ask_ollama()).
-- Has my profile hardcoded as a short text block (MY_PROFILE).
-- Defines score_job(job_text), which sends BOTH my profile and a job
+- Loads your profile from config.json (see load_profile_config()).
+- Defines score_job(job_text), which sends BOTH your profile and a job
   posting to the model, asking it to act like a technical recruiter and
   return a score, strengths, gaps, and a verdict, in a fixed format.
 - Prints the result nicely for one example job.
@@ -79,25 +79,31 @@ RESULTS_JSON_FILE = "results.json"
 REPORT_FILE = "report.html"
 
 # Where --daily's dedicated digest gets written (separate from the full
-# report.html, which still shows every job, scored or not). See
-# cli_run_daily(): it covers every automatically-sourced job whose
-# "saved_at" is newer than the cutoff in LAST_DAILY_RUN_FILE, not just
-# whatever this exact invocation's own fetch happened to add - see that
-# file's comment for why the distinction matters.
+# report.html, which still shows every job, scored or not). This is
+# rendered directly from JOB_LIST_FILE - see update_persistent_job_list()
+# and rebuild_daily_report() below.
 DAILY_REPORT_FILE = "daily_report.html"
 
-# Tracks the timestamp of the last successful --daily report (a tiny
-# JSON file: {"last_run_at": "<ISO timestamp>"}). cli_run_daily() reports
-# on every automatically-sourced job saved AFTER this timestamp, rather
-# than only the jobs this exact invocation's fetch step happened to add.
-# This matters for a scheduled, unattended --daily (see Task Scheduler in
-# the README): if a run gets interrupted after fetching but before
-# finishing scoring (e.g. Ollama wasn't running yet), the jobs it fetched
-# are already saved to jobs.json - the NEXT run's own fetch correctly
-# finds them as duplicates (nothing "new" to add), but a wall-clock
-# cutoff still catches them, where "this run's fetch delta" would have
-# silently skipped them forever.
-LAST_DAILY_RUN_FILE = "last_daily_run.json"
+# The PERSISTENT job list --daily accumulates into, across every run
+# forever - unlike report.html/daily_report.html (which are just
+# generated views), this JSON file IS the durable state:
+#   {
+#     "jobs": {"<job hash>": {"title", "score", "verdict", "flags",
+#                              "source", "url", "date_posted", "date_found"}, ...},
+#     "removed_hashes": ["<job hash>", ...]
+#   }
+# A job earns a permanent spot here once (see update_persistent_job_list())
+# and stays until you remove it via daily_report.html's per-card "Remove"
+# button (server.py's /remove_daily_job) or the "Clear all" button
+# (/clear_daily_list) - a removed job's hash goes into "removed_hashes"
+# so a later run can never silently re-add it.
+JOB_LIST_FILE = "job_list.json"
+
+# Only automatically-sourced jobs scoring ABOVE this make it into the
+# persistent list at all - this is the "auto-drop bad jobs" bar. Chosen
+# to sit comfortably above DOMAIN_MISMATCH_SCORE_CAP (15) so a role-type
+# mismatch can never sneak in just because of scoring noise.
+FIT_SCORE_THRESHOLD = 40
 
 # Only jobs scoring at or above this get a drafted proposal - low-scoring
 # jobs aren't worth spending the client's (or the model's) time on.
@@ -305,20 +311,53 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 # you've already pulled locally (check with `ollama list` in a terminal).
 MODEL_NAME = "llama3.1:8b"
 
-# My profile, as plain text. This gets pasted straight into the prompt
-# we send the model, so it has context on my background when judging
-# whether a job is a good fit. Unlike earlier versions, this one DOES
-# explicitly list weaknesses (see WEAKNESSES below) - testing showed the
-# model needs them spelled out to correctly treat things like "Expert
-# only" or "production experience, not demos" as real gaps against a
-# candidate who is new to Upwork and has no paid production track record.
-MY_PROFILE = """[REDACTED - moved to gitignored config.json]"""
+# Your profile lives in CONFIG_FILE, NOT hardcoded here - see
+# load_profile_config() below. This keeps personal data (real name,
+# employer, background) out of the codebase, so this repo can be shared/
+# forked without leaking anyone's resume - see config.example.json for
+# the expected shape.
+CONFIG_FILE = "config.json"
+CONFIG_EXAMPLE_FILE = "config.example.json"
 
-# My concrete projects, grouped by domain. draft_proposal() uses this to
-# make sure it only pulls in projects that actually match the job's
+
+def load_profile_config():
+    """
+    Load ("my_profile", "my_projects_by_domain") from CONFIG_FILE.
+
+    Exits with a clear, actionable message (never a raw traceback) if
+    CONFIG_FILE is missing, isn't valid JSON, or is missing a required
+    key - there's no sane default profile to fall back to, and every
+    scoring/proposal call needs one. The fix is always the same: copy
+    CONFIG_EXAMPLE_FILE to CONFIG_FILE and fill in your own background.
+    """
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        print(f"ERROR: {CONFIG_FILE} not found.")
+        print(f"Copy {CONFIG_EXAMPLE_FILE} to {CONFIG_FILE} and fill in your own profile:")
+        print(f"  cp {CONFIG_EXAMPLE_FILE} {CONFIG_FILE}")
+        sys.exit(1)
+    except json.JSONDecodeError as error:
+        print(f"ERROR: {CONFIG_FILE} is not valid JSON: {error}")
+        sys.exit(1)
+
+    try:
+        return config["my_profile"], config["my_projects_by_domain"]
+    except KeyError as error:
+        print(f"ERROR: {CONFIG_FILE} is missing required key {error}.")
+        print(f"See {CONFIG_EXAMPLE_FILE} for the expected shape.")
+        sys.exit(1)
+
+
+# My profile and my concrete projects grouped by domain, as plain text -
+# loaded from CONFIG_FILE (see load_profile_config() above). MY_PROFILE
+# gets pasted straight into the scoring prompt so the model has context
+# on your background; MY_PROJECTS_BY_DOMAIN is used by draft_proposal()
+# to make sure it only pulls in projects that actually match the job's
 # domain (e.g. never mention an LLM project in a computer-vision
 # proposal, or vice versa).
-MY_PROJECTS_BY_DOMAIN = """[REDACTED - moved to gitignored config.json]"""
+MY_PROFILE, MY_PROJECTS_BY_DOMAIN = load_profile_config()
 
 # Scoring rules for the model to follow. This has gone through several
 # rounds of fixes:
@@ -807,30 +846,93 @@ def load_results():
         return {}
 
 
-def load_last_daily_cutoff():
+def load_job_list():
     """
-    Read the timestamp of the last successful --daily report from
-    LAST_DAILY_RUN_FILE. Returns a far-past ISO string if the file is
-    missing/corrupt (first-ever --daily run, or someone deleted it) -
-    that just means the next report includes every automatically-sourced
-    job currently in jobs.json, which is the right behavior for a first
-    run rather than an error.
+    Read JOB_LIST_FILE and return its contents as a dict with "jobs"
+    (hash -> entry) and "removed_hashes" (list) keys always present,
+    even if the file is missing/corrupt (first-ever run) or was written
+    by an older version that didn't have one of these keys yet.
     """
     try:
-        with open(LAST_DAILY_RUN_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)["last_run_at"]
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        return "1970-01-01T00:00:00"
+        with open(JOB_LIST_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
+    data.setdefault("jobs", {})
+    data.setdefault("removed_hashes", [])
+    return data
 
 
-def save_last_daily_cutoff(timestamp_str):
+def save_job_list(job_list):
+    """Write `job_list` (see load_job_list()) back to JOB_LIST_FILE."""
+    with open(JOB_LIST_FILE, "w", encoding="utf-8") as f:
+        json.dump(job_list, f, indent=2, ensure_ascii=False)
+
+
+def update_persistent_job_list():
     """
-    Write `timestamp_str` (an ISO timestamp, taken at the START of the
-    --daily run that just finished - see cli_run_daily()) to
-    LAST_DAILY_RUN_FILE as the cutoff for the NEXT run's report.
+    Add newly-qualifying automatically-sourced jobs to the persistent
+    JOB_LIST_FILE and save it. Called once per --daily run, after
+    scoring. Returns (job_list, added_count).
+
+    A job earns a spot in the list if ALL of:
+    - it came from an automatic source (has "freshness" - the manual
+      Upwork-extension flow is out of scope for this list, same as the
+      old cutoff-based daily_report.html was).
+    - it's been scored (has a results.json entry).
+    - its score is ABOVE FIT_SCORE_THRESHOLD.
+    - its title doesn't trip the role-type hard-cap gate (belt and
+      suspenders alongside the score check - a role-type mismatch
+      already caps the score below the threshold via
+      apply_score_adjustments(), so this should never independently
+      change the outcome, but checking it explicitly costs nothing and
+      guards against the threshold being tuned down later).
+
+    Once added, a job's hash stays in the list PERMANENTLY across runs -
+    this function never removes anything (that's cli_run_daily's caller
+    via server.py's /remove_daily_job and /clear_daily_list) - and a
+    hash already in "removed_hashes" (a job you deleted before) is never
+    re-added, even if a later fetch re-discovers the same posting.
     """
-    with open(LAST_DAILY_RUN_FILE, "w", encoding="utf-8") as f:
-        json.dump({"last_run_at": timestamp_str}, f, indent=2)
+    jobs = load_jobs(JOBS_JSON_FILE)
+    results = load_results()
+    job_list = load_job_list()
+
+    removed_hashes = set(job_list["removed_hashes"])
+    current_jobs = job_list["jobs"]
+
+    added = 0
+    for job in jobs:
+        if "freshness" not in job:
+            continue  # manual Upwork-extension flow - out of scope here
+
+        job_text = job.get("text", "")
+        job_hash = hash_job_text(job_text)
+        if job_hash in current_jobs or job_hash in removed_hashes:
+            continue
+
+        cached = results.get(job_hash)
+        if not cached:
+            continue  # not scored yet - will be picked up on a future run
+
+        title = cached["title"]
+        if cached["score"] <= FIT_SCORE_THRESHOLD or role_type_mismatch(title):
+            continue
+
+        current_jobs[job_hash] = {
+            "title": title,
+            "score": cached["score"],
+            "verdict": cached["verdict"],
+            "flags": cached.get("flags", []),
+            "source": job.get("source", "upwork-extension"),
+            "url": job.get("url", ""),
+            "date_posted": job.get("date_added", ""),
+            "date_found": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        added += 1
+
+    save_job_list(job_list)
+    return job_list, added
 
 
 def save_results(results):
@@ -1282,26 +1384,37 @@ SOURCE_BADGE_COLORS = {
 SOURCE_BADGE_DEFAULT_COLOR = "#555555"
 
 
-def build_daily_job_card_html(entry):
+def format_iso_timestamp_date(iso_timestamp):
     """
-    Build the HTML for a single card in daily_report.html: rank, score,
-    a colored source badge (so you can tell at a glance which board a
-    job came from), title, verdict/flags, and a prominent "Open job"
-    button linking straight to the original posting. Deliberately no
-    proposal/cover-letter section - see run_scoring_and_report()'s
-    draft_proposals docstring for why this flow skips that step
-    entirely.
+    Turn an ISO timestamp (with time, e.g. "2026-07-26T14:03:47") into a
+    friendly date-only string like "July 26, 2026". Falls back to the
+    raw string (or "unknown" if empty) rather than crashing over a
+    malformed/missing timestamp.
+    """
+    if not iso_timestamp:
+        return "unknown"
+    try:
+        return datetime.datetime.fromisoformat(iso_timestamp).strftime("%B %d, %Y")
+    except ValueError:
+        return iso_timestamp
+
+
+def build_daily_job_card_html(job_hash, entry):
+    """
+    Build the HTML for a single card in the persistent daily_report.html
+    list: score, a colored source badge, both date stamps (when the
+    posting says it was posted, and when THIS tool first found it),
+    title, verdict/flags, a prominent "Open job" link, and a "Remove"
+    button that permanently deletes this job from JOB_LIST_FILE (see
+    server.py's /remove_daily_job). Deliberately no proposal/cover-letter
+    section - see run_scoring_and_report()'s draft_proposals docstring
+    for why this flow skips that step entirely.
     """
     color = score_to_color(entry["score"])
     badge_color = SOURCE_BADGE_COLORS.get(entry["source"], SOURCE_BADGE_DEFAULT_COLOR)
 
-    metadata_html = ""
-    if entry["metadata"]:
-        metadata_html = f'<p class="metadata">{html.escape(entry["metadata"])}</p>'
-
-    unknown_date_html = ""
-    if entry.get("freshness") == "unknown":
-        unknown_date_html = '<span class="unknown-date-badge">date unknown</span>'
+    posted_display = format_date_heading(entry["date_posted"]) if entry.get("date_posted") else "unknown"
+    found_display = format_iso_timestamp_date(entry.get("date_found", ""))
 
     flags_html = ""
     if entry["flags"]:
@@ -1321,17 +1434,16 @@ def build_daily_job_card_html(entry):
         )
 
     return f"""
-    <div class="card">
+    <div class="card" data-job-id="{job_hash}">
         <div class="card-header">
-            <span class="rank">#{entry['rank']}</span>
             <span class="score" style="color: {color};">{entry['score']}/100</span>
+            <button class="remove-button" data-job-id="{job_hash}" title="Remove from list">&times;</button>
         </div>
         <div class="badges-row">
             <span class="source-badge" style="background-color: {badge_color};">{html.escape(entry['source'])}</span>
-            {unknown_date_html}
         </div>
         <h3 class="job-title">{html.escape(entry['title'])}</h3>
-        {metadata_html}
+        <p class="date-stamps">Posted: {html.escape(posted_display)} &middot; Found: {html.escape(found_display)}</p>
         <p class="verdict">{html.escape(entry['verdict'])}</p>
         {flags_html}
         {link_html}
@@ -1339,22 +1451,34 @@ def build_daily_job_card_html(entry):
     """
 
 
-def build_daily_report_html(entries):
+def build_daily_report_html(jobs_dict):
     """
-    Build the full HTML page for daily_report.html: EVERY job fetched by
-    today's --daily run (see cli_run_daily()), no cap, ranked
-    highest-score-first, each with its score, source (color-coded
-    badge), verdict/flags, and a big "Open job" link straight to the
-    original posting. No proposal/cover-letter section and no
-    "apply"/"submit" button anywhere on this page - see the note on
-    manual applying in the README.
+    Build the full HTML page for daily_report.html from the PERSISTENT
+    job list (JOB_LIST_FILE's "jobs" dict: hash -> entry - see
+    update_persistent_job_list()). Unlike report.html, this list
+    ACCUMULATES across every --daily run rather than being regenerated
+    from scratch - see the module-level comment on JOB_LIST_FILE.
+
+    Sorted newest-FOUND-first (not by score) - `date_found` is always a
+    precise timestamp (unlike `date_posted`, which some sources don't
+    provide), so it's the reliable way to show "what showed up most
+    recently in your list." Score is still shown prominently on every
+    card so you can judge fit at a glance regardless of ordering.
+
+    Each card has a "Remove" (x) button (server.py's /remove_daily_job)
+    that permanently deletes it from JOB_LIST_FILE, and the page has one
+    "Clear all" button (server.py's /clear_daily_list) to wipe the whole
+    list. No proposal/cover-letter section and no "apply"/"submit"
+    button anywhere - see the note on manual applying in the README.
     """
     generated_at_str = datetime.datetime.now().strftime("%B %d, %Y at %H:%M")
 
-    if entries:
-        cards_html = "".join(build_daily_job_card_html(entry) for entry in entries)
+    sorted_items = sorted(jobs_dict.items(), key=lambda item: item[1].get("date_found", ""), reverse=True)
+
+    if sorted_items:
+        cards_html = "".join(build_daily_job_card_html(job_hash, entry) for job_hash, entry in sorted_items)
     else:
-        cards_html = '<p class="empty-state">No new, fresh jobs today - check back after the next --fetch.</p>'
+        cards_html = '<p class="empty-state">Your list is empty - check back after the next --fetch/--daily run.</p>'
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1410,12 +1534,37 @@ def build_daily_report_html(entries):
         font-size: 15px;
         font-weight: 600;
     }}
-    .rank {{
-        color: #888;
-    }}
     .score {{
         font-size: 21px;
         font-weight: 700;
+    }}
+    .remove-button {{
+        border: 1px solid #e0b4b4;
+        border-radius: 6px;
+        background-color: #fdf2f2;
+        color: #a33;
+        font-size: 16px;
+        line-height: 1;
+        width: 28px;
+        height: 28px;
+        cursor: pointer;
+    }}
+    .remove-button:hover {{
+        background-color: #fbe4e4;
+    }}
+    .clear-all-button {{
+        margin-top: 12px;
+        padding: 8px 14px;
+        font-size: 13px;
+        font-weight: 600;
+        border: 1px solid #e0b4b4;
+        border-radius: 6px;
+        background-color: #fdf2f2;
+        color: #a33;
+        cursor: pointer;
+    }}
+    .clear-all-button:hover {{
+        background-color: #fbe4e4;
     }}
     .badges-row {{
         display: flex;
@@ -1433,23 +1582,14 @@ def build_daily_report_html(entries):
         border-radius: 4px;
         padding: 2px 8px;
     }}
-    .unknown-date-badge {{
-        display: inline-block;
-        font-size: 11px;
-        font-weight: 600;
-        color: #8a6215;
-        background-color: #fff3d6;
-        border-radius: 4px;
-        padding: 2px 8px;
-    }}
     .job-title {{
         font-size: 17px;
         font-weight: 600;
         margin: 10px 0 4px 0;
     }}
-    .metadata {{
-        font-size: 13px;
-        color: #666;
+    .date-stamps {{
+        font-size: 12px;
+        color: #888;
         margin: 0 0 10px 0;
     }}
     .verdict {{
@@ -1498,16 +1638,81 @@ def build_daily_report_html(entries):
 </head>
 <body>
     <div class="page-header">
-        <h1>Daily Fresh Job Matches</h1>
-        <p class="generated-at">Generated {generated_at_str}</p>
+        <h1>ML/AI Job List</h1>
+        <p class="generated-at">Last updated {generated_at_str} &middot; {len(sorted_items)} job(s) in your list</p>
         <p class="manual-note">Scores and verdicts only - no cover letters drafted in this
         flow. Open a job's link and apply yourself on the original board;
-        nothing here applies automatically.</p>
+        nothing here applies automatically. This list is persistent - it
+        accumulates across every --fetch/--daily run and only shrinks when
+        YOU remove a job below or click "Clear all."</p>
+        <button id="clear-all-button" class="clear-all-button">Clear all</button>
     </div>
     {cards_html}
+
+    <script>
+        // This runs in the browser when daily_report.html is opened.
+        // server.py (localhost:8765) must be running for Remove/Clear
+        // all to work - see README.md's setup section.
+        const REMOVE_URL = "http://localhost:8765/remove_daily_job";
+        const CLEAR_URL = "http://localhost:8765/clear_daily_list";
+
+        document.querySelectorAll(".remove-button").forEach(function (button) {{
+            button.addEventListener("click", function () {{
+                if (!window.confirm("Remove this job from your list?")) {{
+                    return;
+                }}
+                const jobId = button.getAttribute("data-job-id");
+                fetch(REMOVE_URL, {{
+                    method: "POST",
+                    headers: {{ "Content-Type": "application/json" }},
+                    body: JSON.stringify({{ job_id: jobId }}),
+                }})
+                    .then(function (response) {{
+                        if (!response.ok) {{
+                            throw new Error("Server responded with an error.");
+                        }}
+                        location.reload();
+                    }})
+                    .catch(function () {{
+                        alert("Start src/server.py to enable removing jobs.");
+                    }});
+            }});
+        }});
+
+        document.getElementById("clear-all-button").addEventListener("click", function () {{
+            if (!window.confirm("Clear your ENTIRE job list? This cannot be undone.")) {{
+                return;
+            }}
+            fetch(CLEAR_URL, {{ method: "POST" }})
+                .then(function (response) {{
+                    if (!response.ok) {{
+                        throw new Error("Server responded with an error.");
+                    }}
+                    location.reload();
+                }})
+                .catch(function () {{
+                    alert("Start src/server.py to enable clearing the list.");
+                }});
+        }});
+    </script>
 </body>
 </html>
 """
+
+
+def rebuild_daily_report():
+    """
+    Rebuild daily_report.html directly from the CURRENT JOB_LIST_FILE,
+    with NO scoring/fetching side effects - a pure function of whatever
+    is already on disk. Used by cli_run_daily() after updating the list,
+    and by server.py's /remove_daily_job and /clear_daily_list so the
+    page reflects a removal/clear immediately (same pattern as
+    build_report() for report.html after a delete).
+    """
+    job_list = load_job_list()
+    daily_report_html = build_daily_report_html(job_list["jobs"])
+    with open(DAILY_REPORT_FILE, "w", encoding="utf-8") as f:
+        f.write(daily_report_html)
 
 
 def cli_fetch_jobs():
@@ -1561,76 +1766,36 @@ def cli_run_daily():
            finishes quickly). draft_proposals=False here on purpose - no
            cover letters in this flow, see that parameter's docstring on
            run_scoring_and_report().
-        3. Write daily_report.html: every automatically-sourced job whose
-           "saved_at" is newer than LAST_DAILY_RUN_FILE's cutoff, ranked
-           highest-score-first - no top-N cap. This is a WALL-CLOCK
-           cutoff, not "whatever this run's own fetch step just added" -
-           see LAST_DAILY_RUN_FILE's comment for why that distinction
-           matters for a run that gets interrupted mid-way.
-        4. Print a short terminal summary.
+        3. Add any newly-qualifying jobs to the PERSISTENT job list (see
+           update_persistent_job_list() - score above FIT_SCORE_THRESHOLD,
+           not a role-type mismatch, not previously removed by you).
+        4. Rebuild daily_report.html from the full persistent list
+           (rebuild_daily_report()) - this is NOT "just today's jobs", it
+           ACCUMULATES every qualifying job ever found, across every run,
+           until you remove it yourself.
+        5. Print a short terminal summary.
 
     This NEVER submits anything anywhere - see the README's note on why
     applying stays a manual, human step.
     """
-    cutoff = load_last_daily_cutoff()
-    run_started_at = datetime.datetime.now().isoformat(timespec="seconds")
-
-    print("=== Step 1/3: fetching new, fresh jobs ===")
+    print("=== Step 1/4: fetching new, fresh jobs ===")
     cli_fetch_jobs()
 
-    print("\n=== Step 2/3: scoring today's new jobs (no proposal drafting - scores only) ===")
+    print("\n=== Step 2/4: scoring today's new jobs (no proposal drafting - scores only) ===")
     run_scoring_and_report(use_cache=True, draft_proposals=False)
 
-    print("\n=== Step 3/3: writing daily_report.html ===")
-    jobs = load_jobs(JOBS_JSON_FILE)
-    results_cache = load_results()
+    print("\n=== Step 3/4: updating your persistent job list ===")
+    job_list, added = update_persistent_job_list()
+    print(f"Added {added} newly-qualifying job(s) (score > {FIT_SCORE_THRESHOLD}, real ML/AI engineering fit).")
 
-    entries = []
-    for job in jobs:
-        if "freshness" not in job:
-            continue  # not from an automatic source (e.g. the manual Upwork-extension flow) - out of scope here
-        if job.get("saved_at", "") <= cutoff:
-            continue  # already covered by an earlier --daily report
+    print("\n=== Step 4/4: writing daily_report.html ===")
+    rebuild_daily_report()
 
-        job_text = job.get("text", "")
-        job_hash = hash_job_text(job_text)
-        cached = results_cache.get(job_hash)
-        if not cached:
-            continue  # scoring must have failed for this one - skip it rather than show a fake entry
-
-        title, metadata = extract_title_and_metadata(job_text)
-        entries.append(
-            {
-                "title": title,
-                "metadata": metadata,
-                "score": cached["score"],
-                "verdict": cached["verdict"],
-                "flags": cached.get("flags", []),
-                "url": job.get("url", ""),
-                "source": job.get("source", "upwork-extension"),
-                "freshness": job.get("freshness", "unknown"),
-            }
-        )
-
-    entries.sort(key=lambda entry: -entry["score"])
-    for rank, entry in enumerate(entries, start=1):
-        entry["rank"] = rank
-
-    daily_report_html = build_daily_report_html(entries)
-    with open(DAILY_REPORT_FILE, "w", encoding="utf-8") as f:
-        f.write(daily_report_html)
-
-    # Only advance the cutoff after the report has actually been written,
-    # so a crash earlier in this function (e.g. Ollama unreachable during
-    # scoring) leaves the cutoff untouched - the next run will still pick
-    # up everything since the LAST successful report, not silently skip it.
-    save_last_daily_cutoff(run_started_at)
-
-    print(f"\n===== Today's fresh jobs (see {DAILY_REPORT_FILE}) =====")
-    if not entries:
-        print("No new, fresh jobs since the last report.")
-    for entry in entries:
-        print(f"#{entry['rank']} [{entry['score']}/100] {entry['title']}  ({entry['source']})")
+    total = len(job_list["jobs"])
+    print(f"\n===== Your job list: {total} job(s) (see {DAILY_REPORT_FILE}) =====")
+    top_by_date = sorted(job_list["jobs"].values(), key=lambda entry: entry.get("date_found", ""), reverse=True)
+    for entry in top_by_date[: max(added, 5)]:
+        print(f"[{entry['score']}/100] {entry['title']}  ({entry['source']})")
         if entry["url"]:
             print(f"   {entry['url']}")
 
