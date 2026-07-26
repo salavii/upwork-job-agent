@@ -249,13 +249,20 @@ class JobGrabberRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         """
         Route an incoming POST request to the right handler based on
-        its path: /save_job (from the browser extension) or /delete_job
-        (from report.html's delete buttons). Anything else gets a 404.
+        its path: /save_job (from the browser extension), /delete_job
+        (from report.html's delete buttons), /remove_daily_job and
+        /clear_daily_list (from daily_report.html's persistent job list -
+        see match_llm.py's update_persistent_job_list()). Anything else
+        gets a 404.
         """
         if self.path == "/save_job":
             self._handle_save_job()
         elif self.path == "/delete_job":
             self._handle_delete_job()
+        elif self.path == "/remove_daily_job":
+            self._handle_remove_daily_job()
+        elif self.path == "/clear_daily_list":
+            self._handle_clear_daily_list()
         else:
             self._send_json_response(404, {"error": f"Unknown endpoint: {self.path}"})
 
@@ -388,6 +395,55 @@ class JobGrabberRequestHandler(BaseHTTPRequestHandler):
         print(f"Rebuilt {match_llm.REPORT_FILE}")
 
         self._send_json_response(200, {"status": "deleted", "title": title})
+
+    def _handle_remove_daily_job(self):
+        """
+        Permanently remove one job from match_llm.py's PERSISTENT job
+        list (job_list.json - see update_persistent_job_list()), called
+        by daily_report.html's per-card "Remove" (x) button. The job's
+        hash is recorded in "removed_hashes" too, so a later --fetch/
+        --daily re-discovering the same posting can never silently
+        re-add it - this is a real deletion, not just a display filter.
+        """
+        parsed_body, _, _ = self._read_json_body()
+        job_id = parsed_body.get("job_id")
+
+        if not job_id:
+            self._send_json_response(400, {"error": "No job_id provided"})
+            return
+
+        job_list = match_llm.load_job_list()
+        removed_entry = job_list["jobs"].pop(job_id, None)
+
+        if removed_entry is None:
+            self._send_json_response(404, {"error": "Job not found in list"})
+            return
+
+        if job_id not in job_list["removed_hashes"]:
+            job_list["removed_hashes"].append(job_id)
+        match_llm.save_job_list(job_list)
+
+        print(f"Removed from job list: {removed_entry['title']}")
+
+        match_llm.rebuild_daily_report()
+        print(f"Rebuilt {match_llm.DAILY_REPORT_FILE}")
+
+        self._send_json_response(200, {"status": "removed", "title": removed_entry["title"]})
+
+    def _handle_clear_daily_list(self):
+        """
+        Wipe match_llm.py's PERSISTENT job list entirely (both the
+        current jobs AND the removed-hashes tombstone list, since this
+        is meant to be a genuine fresh start - see daily_report.html's
+        "Clear all" button), then rebuild the now-empty daily_report.html.
+        """
+        match_llm.save_job_list({"jobs": {}, "removed_hashes": []})
+        print("Cleared the entire persistent job list.")
+
+        match_llm.rebuild_daily_report()
+        print(f"Rebuilt {match_llm.DAILY_REPORT_FILE}")
+
+        self._send_json_response(200, {"status": "cleared"})
 
     def log_message(self, format, *args):
         """

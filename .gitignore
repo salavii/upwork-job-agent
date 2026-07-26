@@ -2,13 +2,17 @@
 __pycache__/
 *.pyc
 
+# Private personal data - not meant to be shared/committed.
+# See config.example.json for the expected shape of config.json.
+config.json
+
 # Private job data and generated output - not meant to be shared/committed.
 # See jobs.example.json for the expected shape of jobs.json.
 jobs.json
 results.json
 report.html
 daily_report.html
-last_daily_run.json
+job_list.json
 jobs_backup.json
 results_backup.json
 daily_run_log.txt

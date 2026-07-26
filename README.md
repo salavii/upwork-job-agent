@@ -34,9 +34,12 @@ missing feature.
 4. **Applies hard-coded fit gates** on top of the model's own judgment,
    because testing showed the model alone isn't reliable enough — see
    [Scoring gates](#scoring-gates) below.
-5. **Writes a ranked HTML report** (`daily_report.html`) — every fresh,
-   relevant job, highest score first, each with its score, verdict,
-   flags, source, and a direct link to the original posting.
+5. **Maintains a persistent job list** (`daily_report.html`) — every job
+   that clears the fit bar gets a PERMANENT spot, accumulating across
+   every run, with a checkbox-style Remove button per job and a
+   Clear-all button, so it behaves like a real to-do list rather than a
+   report that resets every time — see [The persistent job
+   list](#the-persistent-job-list) below.
 6. **Runs unattended on a schedule** (Windows Task Scheduler, 3x/day out
    of the box) so the report is just waiting for you.
 7. **(Optional, manual)** A Chrome extension + local server let you save
@@ -140,11 +143,15 @@ library):
 pip install requests
 ```
 
-**3. Edit your profile.** Open `src/match_llm.py` and replace
-`MY_PROFILE` and `MY_PROJECTS_BY_DOMAIN` with your own background,
-including honest weaknesses (the scorer is deliberately strict about
-gaps) — these are hardcoded on purpose, not read from a config file, so
-there's exactly one obvious place to look.
+**3. Set up your profile.** Copy `config.example.json` to `config.json`
+and fill in your own background, including honest weaknesses (the scorer
+is deliberately strict about gaps):
+```
+cp config.example.json config.json
+```
+`config.json` is gitignored — it's your personal data and never gets
+committed. If it's missing, `match_llm.py` exits immediately with a clear
+message telling you to create it, instead of a raw traceback.
 
 **4. Run it:**
 ```
@@ -181,11 +188,42 @@ python src/match_llm.py --daily    # fetch + score new jobs + write daily_report
 
 `--daily` is the main workflow: fetch → score anything unscored (reusing
 `results.json`, so a normal day is a handful of new postings, not a full
-re-score) → write `daily_report.html` covering every automatically-sourced
-job saved since the last successful report (a wall-clock cutoff in
-`last_daily_run.json`, not just "whatever this exact run's fetch added" —
-this survives a run that gets interrupted mid-way, e.g. Ollama not
-running yet, without silently dropping jobs from every future report).
+re-score) → add any newly-qualifying jobs to the persistent list → rebuild
+`daily_report.html` from that list.
+
+## The persistent job list
+
+`daily_report.html` is not regenerated from scratch each run — it's
+rendered from `job_list.json`, a small JSON file that accumulates
+qualifying jobs FOREVER, across every `--daily` run, until you remove
+them yourself:
+
+- **Accumulates, doesn't wipe.** Each run adds newly-found relevant jobs
+  to the existing list. The same job is never added twice (deduped by
+  the same job-text hash used everywhere else).
+- **Auto-drops bad jobs at the door.** A job only earns a spot if its
+  score is above `FIT_SCORE_THRESHOLD` (40 by default) AND it doesn't
+  trip the role-type hard-cap gate — low-scoring or off-field jobs never
+  clutter the list in the first place.
+- **Date stamps, sorted newest-found-first.** Each card shows both when
+  the posting says it was made ("Posted") and when this tool first
+  found it ("Found") — the list is sorted by the latter, since it's
+  always a precise timestamp (some boards don't expose a reliable
+  posted date).
+- **Per-job Remove button.** Each card has a small "×" button. Clicking
+  it calls `src/server.py`'s `/remove_daily_job` endpoint, which deletes
+  the job from `job_list.json` PERMANENTLY — its hash also goes into a
+  `"removed_hashes"` tombstone list, so a later run re-discovering the
+  same posting can never silently bring it back.
+- **Clear-all button.** Wipes the entire list (and the removed-hashes
+  tombstone list) for a genuine fresh start.
+- **Score, verdict, source badge, flags, and the "Open job" link** are
+  still shown on every card — no proposal/cover-letter section, same as
+  before.
+
+`src/server.py` must be running for Remove/Clear-all to work (same
+requirement as `report.html`'s delete button) — see
+[Setup](#optional-manual-upwork-extension).
 
 ## Running on a schedule (Windows Task Scheduler)
 
@@ -263,14 +301,16 @@ src/
   match.py            Deterministic keyword-matching baseline (no LLM) - kept as a comparison point
 extension/            Chrome extension (Manifest V3) for the manual Upwork flow
 run_daily.bat          Task Scheduler wrapper for unattended --daily runs
+config.example.json    Template for config.json - copy and fill in your own profile
 jobs.example.json      Example shape of jobs.json, for anyone cloning this repo
 KNOWN_ISSUES.md         Known, low-priority rough edges
 ```
 
-`jobs.json`, `results.json`, `report.html`, `daily_report.html`,
-`last_daily_run.json`, and `daily_run_log.txt` are all gitignored
-(personal job data and generated output) — see `jobs.example.json` for
-the shape `src/server.py`/`src/sources.py` write.
+`config.json` (your personal profile), `jobs.json`, `results.json`,
+`report.html`, `daily_report.html`, `job_list.json`, and
+`daily_run_log.txt` are all gitignored (personal data and generated
+output) — see `config.example.json` for the profile shape and
+`jobs.example.json` for the shape `src/server.py`/`src/sources.py` write.
 
 `match.py` is a from-scratch keyword matcher (looks for skills as
 whole words/phrases, computes a percentage match) — simple, fast, fully
