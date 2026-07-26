@@ -57,6 +57,15 @@ import sys
 # database - two identical job texts always hash to the same value.
 import hashlib
 
+# sources.py is the new, automatic job-discovery module (PART A/B/C of
+# this feature): it pulls jobs from public job-board APIs (RemoteOK,
+# Remotive), normalizes them into the same shape jobs.json already uses,
+# and filters/dedups them. Importing it here does not touch the
+# extension + server.py flow in any way - that flow keeps writing to
+# jobs.json exactly as before; --fetch/--daily just also read/write the
+# same file.
+import sources
+
 # The file server.py saves scraped jobs into: a JSON list of objects
 # shaped like {"text": "...", "date_added": "YYYY-MM-DD", "saved_at": "..."}.
 JOBS_JSON_FILE = "jobs.json"
@@ -69,9 +78,224 @@ RESULTS_JSON_FILE = "results.json"
 # Where the HTML report gets written.
 REPORT_FILE = "report.html"
 
+# Where --daily's dedicated digest gets written (separate from the full
+# report.html, which still shows every job, scored or not). See
+# cli_run_daily(): it covers every automatically-sourced job whose
+# "saved_at" is newer than the cutoff in LAST_DAILY_RUN_FILE, not just
+# whatever this exact invocation's own fetch happened to add - see that
+# file's comment for why the distinction matters.
+DAILY_REPORT_FILE = "daily_report.html"
+
+# Tracks the timestamp of the last successful --daily report (a tiny
+# JSON file: {"last_run_at": "<ISO timestamp>"}). cli_run_daily() reports
+# on every automatically-sourced job saved AFTER this timestamp, rather
+# than only the jobs this exact invocation's fetch step happened to add.
+# This matters for a scheduled, unattended --daily (see Task Scheduler in
+# the README): if a run gets interrupted after fetching but before
+# finishing scoring (e.g. Ollama wasn't running yet), the jobs it fetched
+# are already saved to jobs.json - the NEXT run's own fetch correctly
+# finds them as duplicates (nothing "new" to add), but a wall-clock
+# cutoff still catches them, where "this run's fetch delta" would have
+# silently skipped them forever.
+LAST_DAILY_RUN_FILE = "last_daily_run.json"
+
 # Only jobs scoring at or above this get a drafted proposal - low-scoring
 # jobs aren't worth spending the client's (or the model's) time on.
 PROPOSAL_SCORE_THRESHOLD = 70
+
+# ============================================================
+# CODE-LEVEL scoring gates.
+#
+# Testing repeatedly showed the local 8B model's own self-reported
+# judgment (DOMAIN FIT, its COMPONENTS fraction) is not reliable enough
+# to trust alone: business/ops/sales roles that merely mention "AI" in
+# passing scored 75-100/100 because the model conflates "this text talks
+# a lot about AI" with "this role IS AI engineering". Rather than keep
+# patching the prompt and hoping, ROLE TYPE is a deterministic, HARD cap
+# in code, immune to the model's own reasoning.
+#
+# SENIORITY and YEARS-OF-EXPERIENCE, by contrast, are deliberately SOFT
+# penalties, not caps: this is a free job board with no per-application
+# cost (unlike Upwork), so a senior/high-experience ML role that
+# otherwise matches the resume well should still surface, just ranked a
+# bit lower - the user wants to see it and decide for themselves, not
+# have the tool hide it.
+#
+# LOCATION/ELIGIBILITY has NO score effect at all - it's purely an
+# informational FLAG (see location_flag()) shown in the report, since
+# the user wants to see and judge these themselves too.
+# ============================================================
+
+# Gate 0 (existing): the model's own DOMAIN FIT self-report.
+DOMAIN_MISMATCH_SCORE_CAP = 15
+
+# Gate 1: ROLE TYPE (HARD cap - unchanged). Only hands-on ML/AI/
+# data-science engineering or developer roles are what this profile is
+# for - a title containing any of these words indicates a different
+# FUNCTION (leadership, sales, recruiting, admin, ...) regardless of how
+# much AI vocabulary surrounds it, and is capped at
+# DOMAIN_MISMATCH_SCORE_CAP. Deliberately no "but it also says engineer"
+# exception for management/director/head of/principal/staff -
+# "Engineering Manager" or "Director of AI" are still leadership
+# functions, not hands-on IC work.
+ROLE_TYPE_MISMATCH_PATTERN = re.compile(
+    r"\b(management|manager|director|head of|principal|staff|strategy"
+    r"|product manager|sales|business development|recruiter|recruiting"
+    r"|accounting|accountant|finance|communications?|marketing"
+    r"|subject matter expert|executive assistant|analyst|it support"
+    r"|frontend|front-end|video editor|data annotator|consultant"
+    r"|customer (success|solutions|support)"
+    r"|value engineer|solutions? engineer|sales engineer|manufacturing"
+    r"|account|pre-sales)\b",
+    re.IGNORECASE,
+)
+
+# Backstop for Gate 1: some non-engineering roles don't signal it in the
+# TITLE at all (e.g. an "AI Technology Expert" title that reads as a
+# hands-on role but whose actual responsibilities are business-process/
+# consulting/customer-facing work). Checked against the job's full TEXT,
+# not just the title - but only when the title does NOT already contain
+# a clear engineering word (engineer, scientist, developer, researcher),
+# so a real "Senior ML Engineer" posting that happens to mention
+# "customer-facing" once in a stakeholder-communication bullet isn't
+# capped just for that.
+ENGINEERING_TITLE_PATTERN = re.compile(
+    r"\b(engineer(ing)?|scientist|developer|research(er)?)\b", re.IGNORECASE
+)
+BUSINESS_PROCESS_CONTENT_PATTERN = re.compile(
+    r"\b(business process(es)?|stakeholder management|customer-facing"
+    r"|solution consulting|value engineering|sales cycle"
+    r"|account management|pre-sales|post-sales|manufacturing operations"
+    r"|process improvement)\b",
+    re.IGNORECASE,
+)
+
+# Gate 2: SENIORITY (SOFT penalty, not a cap). This profile is
+# early-career (M.Sc. student, ~1-2 years hands-on) - a title signaling
+# heavy seniority, or a stated requirement of more than
+# SENIORITY_MAX_YEARS years of professional experience, gets a flat
+# points deduction instead of being capped, so a strong-fitting senior
+# role still ranks reasonably rather than getting buried.
+SENIORITY_TITLE_PATTERN = re.compile(r"\b(senior|lead)\b", re.IGNORECASE)
+YEARS_EXPERIENCE_PATTERN = re.compile(
+    r"(\d{1,2})\+?\s*(?:-\s*\d{1,2}\s*)?\s*years?\s+(?:of\s+)?(?:professional\s+|relevant\s+)?experience",
+    re.IGNORECASE,
+)
+SENIORITY_MAX_YEARS = 4
+SENIORITY_PENALTY_POINTS = 12
+
+# Gate 3: LOCATION/ELIGIBILITY (INFORMATIONAL FLAG ONLY, no score
+# effect). The candidate is in Italy on a student residence permit - a
+# job that requires being based in / authorized to work in a specific
+# country, an on-site presence, or a security clearance may not be
+# something they're eligible for, but that's the user's call to make,
+# not the tool's to hide. This is a heuristic text search, not true NLP -
+# it can't detect negation (e.g. "no work authorization required" would
+# still match "work authorization"), so treat the flag as a prompt to go
+# check, not gospel.
+LOCATION_RESTRICTION_PATTERN = re.compile(
+    r"\b(us[\s-]based|u\.s\.[\s-]based|united states[\s-]based"
+    r"|must be (located|based|residing) in|must reside in"
+    r"|work authorization|authorized to work in|security clearance"
+    r"|citizens? only|on-?site|in-office|in office|relocat(e|ion) to)\b",
+    re.IGNORECASE,
+)
+
+# Gate 4: DEAD POSTINGS. A posting that says there's no open role right
+# now isn't a job at all - see sources.py's is_dead_posting() for where
+# these get filtered out at FETCH time (so they never reach jobs.json in
+# the first place); DEAD_POSTING_PATTERN is defined here so match_llm.py
+# doesn't need to import sources.py just for this one regex, and reused
+# below to catch anything that slipped in before that filter existed.
+DEAD_POSTING_PATTERN = re.compile(
+    r"don'?t currently have any open (roles?|positions?)"
+    r"|no (current|open) (openings|positions|roles)"
+    r"|not currently hiring",
+    re.IGNORECASE,
+)
+
+# The browser extension saves manual Upwork jobs with the title formatted
+# as "<actual title> - <Upwork category>" (e.g. "AI/ML Engineer Needed
+# for a Simple AI Assistant (MVP) - Digital Marketing" - the category is
+# Upwork's OWN classification, not part of the real job title. Checking
+# ROLE_TYPE_MISMATCH_PATTERN/SENIORITY_TITLE_PATTERN against the whole
+# string caused false caps (a real ML job filed under Upwork's "Digital
+# Marketing" category got capped to 15 purely because "marketing"
+# appeared in the tag). Only strip a trailing " - <category>" when it
+# matches a known Upwork category name, so a job whose REAL title
+# legitimately ends in " - Something" (e.g. auto-sourced job titles
+# never have this pattern) is never mangled.
+KNOWN_UPWORK_CATEGORIES = {
+    "AI & Machine Learning", "Web Development", "Data Analysis & Testing",
+    "Digital Marketing", "DevOps & Solution Architecture",
+    "Lead Generation & Telemarketing", "Design & Creative", "Writing",
+    "Admin Support", "Customer Service", "Sales & Marketing",
+    "Accounting & Consulting", "Legal", "Engineering & Architecture",
+    "Translation", "IT & Networking", "Data Science & Analytics",
+}
+
+
+def strip_upwork_category_suffix(title):
+    """See KNOWN_UPWORK_CATEGORIES above for why this exists."""
+    match = re.search(r"^(.*) - ([^-]+)$", title)
+    if match and match.group(2).strip() in KNOWN_UPWORK_CATEGORIES:
+        return match.group(1).strip()
+    return title
+
+
+def role_type_mismatch(title):
+    """Gate 1 - see ROLE_TYPE_MISMATCH_PATTERN above."""
+    return bool(ROLE_TYPE_MISMATCH_PATTERN.search(strip_upwork_category_suffix(title)))
+
+
+def content_suggests_non_engineering_role(title, job_text):
+    """Gate 1 backstop - see BUSINESS_PROCESS_CONTENT_PATTERN above."""
+    if ENGINEERING_TITLE_PATTERN.search(strip_upwork_category_suffix(title)):
+        return False
+    return bool(BUSINESS_PROCESS_CONTENT_PATTERN.search(job_text))
+
+
+def seniority_mismatch(title, job_text):
+    """Gate 2 - see SENIORITY_TITLE_PATTERN/YEARS_EXPERIENCE_PATTERN above."""
+    if SENIORITY_TITLE_PATTERN.search(strip_upwork_category_suffix(title)):
+        return True
+    for match in YEARS_EXPERIENCE_PATTERN.finditer(job_text):
+        if int(match.group(1)) > SENIORITY_MAX_YEARS:
+            return True
+    return False
+
+
+def location_flag(job_text):
+    """
+    Gate 3 - see LOCATION_RESTRICTION_PATTERN above. Returns an
+    informational flag string naming the matched phrase (e.g. "US-based"),
+    or None if nothing matched. NEVER affects the score - see
+    apply_score_adjustments().
+    """
+    match = LOCATION_RESTRICTION_PATTERN.search(job_text)
+    if not match:
+        return None
+    return f'Possible location/eligibility restriction: "{match.group(0)}" - check if you qualify.'
+
+
+def is_dead_posting(job_text):
+    """Gate 4 - see DEAD_POSTING_PATTERN above."""
+    return bool(DEAD_POSTING_PATTERN.search(job_text))
+
+
+def apply_score_adjustments(score, domain_fit, title, job_text):
+    """
+    Apply the role-type HARD cap and the seniority SOFT penalty to
+    `score` and return the result (see the gate comments above for why
+    they're treated differently). Location is intentionally NOT applied
+    here at all - see location_flag(), used separately to add an
+    informational flag without touching the score.
+    """
+    if not domain_fit or role_type_mismatch(title) or content_suggests_non_engineering_role(title, job_text):
+        return min(score, DOMAIN_MISMATCH_SCORE_CAP)
+    if seniority_mismatch(title, job_text):
+        return max(0, score - SENIORITY_PENALTY_POINTS)
+    return score
 
 # This is the standard local address Ollama listens on. "11434" is just
 # the fixed port number Ollama always uses by default.
@@ -83,10 +307,11 @@ MODEL_NAME = "llama3.1:8b"
 
 # My profile, as plain text. This gets pasted straight into the prompt
 # we send the model, so it has context on my background when judging
-# whether a job is a good fit. Deliberately does NOT pre-list weaknesses
-# (e.g. "backend experience is limited") - the model is expected to infer
-# any gaps itself by comparing what a job asks for against what's
-# actually present here.
+# whether a job is a good fit. Unlike earlier versions, this one DOES
+# explicitly list weaknesses (see WEAKNESSES below) - testing showed the
+# model needs them spelled out to correctly treat things like "Expert
+# only" or "production experience, not demos" as real gaps against a
+# candidate who is new to Upwork and has no paid production track record.
 MY_PROFILE = """[REDACTED - moved to gitignored config.json]"""
 
 # My concrete projects, grouped by domain. draft_proposal() uses this to
@@ -109,19 +334,31 @@ MY_PROJECTS_BY_DOMAIN = """[REDACTED - moved to gitignored config.json]"""
 #   actually requires, and only count a gap against me if it maps to one
 #   of those requirements. A skill I lack that the job never asked for
 #   must NOT lower the score.
-# - v4 (this version) fixes a different failure mode: v3 still scored
-#   large, multi-skill jobs too generously in the middle (a 60/100 for a
-#   giant desktop app - 3D avatars, voice, databases, websockets,
-#   installer - where I could only realistically deliver one small
-#   slice). v3 only checked "is this skill missing?", not "how much of
-#   the WHOLE job can I actually cover?". v4 adds an explicit
-#   components-and-fraction step: break the job into its main
-#   components, judge each one, and score based on what FRACTION of the
-#   overall job I could deliver - so a perfect match on 1 of 5 unrelated
-#   components stays LOW, not "medium". It also adds a separate FLAGS
-#   step for red flags unrelated to skill match (e.g. a budget far too
-#   small for the described scope) - these are informational, not part
-#   of the skill-fit score itself.
+# - v4 fixes a different failure mode: v3 still scored large,
+#   multi-skill jobs too generously in the middle (a 60/100 for a giant
+#   desktop app - 3D avatars, voice, databases, websockets, installer -
+#   where I could only realistically deliver one small slice). v3 only
+#   checked "is this skill missing?", not "how much of the WHOLE job can
+#   I actually cover?". v4 adds an explicit components-and-fraction step:
+#   break the job into its main components, judge each one, and score
+#   based on what FRACTION of the overall job I could deliver - so a
+#   perfect match on 1 of 5 unrelated components stays LOW, not "medium".
+#   It also adds a separate FLAGS step for red flags unrelated to skill
+#   match (e.g. a budget far too small for the described scope).
+# - v5 (this version) fixes a failure mode the automatic job-board
+#   sources (sources.py) exposed that v4 never hit with hand-picked
+#   Upwork postings: business/ops/sales roles (Customer Success Manager,
+#   Executive Assistant, Business Development Rep) that merely mention
+#   "AI" once in passing scored 75-83/100. The COMPONENTS breakdown was
+#   the problem - the model would judge components like "communication"
+#   or "process improvement" as PARTIAL matches against a research/ML
+#   background, inflating the fraction for a job that was never an ML
+#   role to begin with. v5 adds an explicit DOMAIN FIT gate BEFORE the
+#   components breakdown: if the job's PRIMARY function isn't actually
+#   ML/AI/data-science engineering, the score is capped low in code
+#   (see DOMAIN_MISMATCH_SCORE_CAP), regardless of what the components
+#   step would otherwise compute - the same "don't trust the model's own
+#   arithmetic, verify in code" principle as compute_score_from_components().
 STRICT_SCORING_GUIDELINES = """
 Score as a STRICT freelance-fit judge, not an encouraging recruiter. Be
 skeptical: most real jobs need several different skills, and partially
@@ -130,6 +367,22 @@ time, be FAIR: only judge the candidate against what THIS job actually
 asks for, never against unrelated skills the candidate happens to lack.
 
 Follow these steps before assigning a score:
+0. FIRST, decide whether this job's PRIMARY function is actual hands-on
+   machine learning / AI / data-science ENGINEERING work - building,
+   training, fine-tuning, or deploying models; designing LLM/RAG
+   systems; computer vision; data science modeling; or similarly
+   technical ML/AI work. This is NOT the same as a job that just mentions
+   "AI" as a buzzword, requires "AI fluency" as a soft skill, or belongs
+   to a company whose PRODUCT is AI-powered while the ROLE itself is
+   sales, customer success, business development, executive/admin
+   support, accounting, marketing, recruiting, or another non-engineering
+   function. If the job's primary function is NOT ML/AI/data-science
+   engineering, write DOMAIN FIT: no and STOP giving it credit for
+   superficial overlaps in the steps below - the final score MUST stay
+   low no matter how the components step comes out (this is enforced in
+   code too, not just by this instruction). Only a job whose primary
+   function genuinely IS ML/AI/data-science engineering gets DOMAIN FIT:
+   yes and a normal components-based score.
 1. Extract a short list of what THIS job actually requires, based only
    on the job posting text. Split that list into MANDATORY/CORE
    requirements (explicitly required/mandatory, or clearly central to
@@ -167,6 +420,14 @@ Follow these steps before assigning a score:
    pipelines, 3D/graphics work). If it is not in the profile, it is NO -
    being a capable engineer in general is not the same as having the
    specific skill this job needs.
+   NEVER assume, infer, invent, or give credit for a skill, tool, or
+   amount of experience that is not EXPLICITLY written in the candidate
+   profile text below. If you are not sure whether the profile actually
+   says it, treat it as NOT present - "the candidate is probably familiar
+   with X" or "this is likely transferable" is not a valid basis for YES
+   or PARTIAL unless the profile text itself supports it. Judge only the
+   concrete overlap between what the profile actually lists and what the
+   job actually states.
 4. Count the components: FRACTION = (number of YES + 0.5 x number of
    PARTIAL) / (total number of components). Compute this as an actual
    number, do not guess or default to "about half" - a job where the
@@ -210,15 +471,17 @@ have something to say.
 # code later, if we want to extract just the score, for example.
 RESPONSE_FORMAT_INSTRUCTIONS = """
 Respond in EXACTLY this format, with nothing before or after it, and no
-markdown formatting (no asterisks, no headers). Fill in JOB REQUIRES and
-COMPONENTS FIRST, and only list a gap in GAPS if it also appears in JOB
-REQUIRES - if a candidate weakness is not in JOB REQUIRES, it must be
-left out of GAPS entirely, since the job never asked for it:
+markdown formatting (no asterisks, no headers). Fill in DOMAIN FIT,
+JOB REQUIRES, and COMPONENTS FIRST, and only list a gap in GAPS if it
+also appears in JOB REQUIRES - if a candidate weakness is not in JOB
+REQUIRES, it must be left out of GAPS entirely, since the job never
+asked for it:
 
+DOMAIN FIT: <yes/no - is this job's PRIMARY function genuine ML/AI/data-science engineering work, not a business/ops/sales/support role that just mentions AI in passing?>
 JOB REQUIRES: <comma-separated list of what this job actually needs, mandatory items marked with (core)>
 COMPONENTS: <comma-separated list of the job's main, non-overlapping components, each followed by (yes), (partial), or (no) - be strict, see the rules above>
 DELIVERABLE FRACTION: <the actual count, e.g. "1 YES + 0 PARTIAL out of 5 components = 0.2">
-SCORE: <a single integer from 0 to 100, computed from the fraction above (fraction x 100, adjusted slightly for mandatory/core gaps)>
+SCORE: <a single integer from 0 to 100, computed from the fraction above (fraction x 100, adjusted slightly for mandatory/core gaps) - if DOMAIN FIT is no, this must be 15 or below regardless of the fraction>
 STRENGTHS:
 - <strength 1>
 - <strength 2>
@@ -544,6 +807,32 @@ def load_results():
         return {}
 
 
+def load_last_daily_cutoff():
+    """
+    Read the timestamp of the last successful --daily report from
+    LAST_DAILY_RUN_FILE. Returns a far-past ISO string if the file is
+    missing/corrupt (first-ever --daily run, or someone deleted it) -
+    that just means the next report includes every automatically-sourced
+    job currently in jobs.json, which is the right behavior for a first
+    run rather than an error.
+    """
+    try:
+        with open(LAST_DAILY_RUN_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)["last_run_at"]
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return "1970-01-01T00:00:00"
+
+
+def save_last_daily_cutoff(timestamp_str):
+    """
+    Write `timestamp_str` (an ISO timestamp, taken at the START of the
+    --daily run that just finished - see cli_run_daily()) to
+    LAST_DAILY_RUN_FILE as the cutoff for the NEXT run's report.
+    """
+    with open(LAST_DAILY_RUN_FILE, "w", encoding="utf-8") as f:
+        json.dump({"last_run_at": timestamp_str}, f, indent=2)
+
+
 def save_results(results):
     """
     Write the `results` cache dict back to RESULTS_JSON_FILE.
@@ -571,6 +860,20 @@ def parse_score_and_verdict(raw_reply):
     verdict = verdict_match.group(1).strip() if verdict_match else "(no verdict found)"
 
     return score, verdict
+
+
+def parse_domain_fit(raw_reply):
+    """
+    Pull the "DOMAIN FIT: yes/no" line out of a score_job() reply (see
+    STRICT_SCORING_GUIDELINES' v5 note and DOMAIN_MISMATCH_SCORE_CAP).
+
+    Returns True only if the model explicitly wrote "yes" - a missing or
+    malformed DOMAIN FIT line does NOT default to True, since a job we
+    can't confirm is genuinely ML/AI/data-science engineering shouldn't
+    get the benefit of the doubt on a score cap this consequential.
+    """
+    match = re.search(r"DOMAIN FIT:\s*(yes|no)", raw_reply, re.IGNORECASE)
+    return bool(match) and match.group(1).lower() == "yes"
 
 
 def parse_flags(raw_reply):
@@ -962,6 +1265,379 @@ def build_html_report(results_by_date, sorted_dates):
 """
 
 
+# A distinct color per source, purely so the eye can tell boards apart
+# at a glance when scanning a long, mixed-source list. Any source not
+# listed here (a newly added one that hasn't been given a color yet)
+# falls back to SOURCE_BADGE_DEFAULT_COLOR - never a KeyError.
+SOURCE_BADGE_COLORS = {
+    "remoteok": "#c0392b",
+    "remotive": "#2465b0",
+    "arbeitnow": "#1b8a3d",
+    "himalayas": "#8e44ad",
+    "jobicy": "#c77700",
+    "themuse": "#117a8b",
+    "weworkremotely": "#3d5875",
+    "upwork-extension": "#14a800",
+}
+SOURCE_BADGE_DEFAULT_COLOR = "#555555"
+
+
+def build_daily_job_card_html(entry):
+    """
+    Build the HTML for a single card in daily_report.html: rank, score,
+    a colored source badge (so you can tell at a glance which board a
+    job came from), title, verdict/flags, and a prominent "Open job"
+    button linking straight to the original posting. Deliberately no
+    proposal/cover-letter section - see run_scoring_and_report()'s
+    draft_proposals docstring for why this flow skips that step
+    entirely.
+    """
+    color = score_to_color(entry["score"])
+    badge_color = SOURCE_BADGE_COLORS.get(entry["source"], SOURCE_BADGE_DEFAULT_COLOR)
+
+    metadata_html = ""
+    if entry["metadata"]:
+        metadata_html = f'<p class="metadata">{html.escape(entry["metadata"])}</p>'
+
+    unknown_date_html = ""
+    if entry.get("freshness") == "unknown":
+        unknown_date_html = '<span class="unknown-date-badge">date unknown</span>'
+
+    flags_html = ""
+    if entry["flags"]:
+        flag_items_html = "".join(f"<li>{html.escape(flag)}</li>" for flag in entry["flags"])
+        flags_html = f"""
+        <div class="flags-box">
+            <div class="flags-label">⚠ Flags</div>
+            <ul>{flag_items_html}</ul>
+        </div>
+        """
+
+    link_html = ""
+    if entry["url"]:
+        link_html = (
+            f'<a class="open-job-button" href="{html.escape(entry["url"])}" '
+            f'target="_blank" rel="noopener noreferrer">Open job &rarr;</a>'
+        )
+
+    return f"""
+    <div class="card">
+        <div class="card-header">
+            <span class="rank">#{entry['rank']}</span>
+            <span class="score" style="color: {color};">{entry['score']}/100</span>
+        </div>
+        <div class="badges-row">
+            <span class="source-badge" style="background-color: {badge_color};">{html.escape(entry['source'])}</span>
+            {unknown_date_html}
+        </div>
+        <h3 class="job-title">{html.escape(entry['title'])}</h3>
+        {metadata_html}
+        <p class="verdict">{html.escape(entry['verdict'])}</p>
+        {flags_html}
+        {link_html}
+    </div>
+    """
+
+
+def build_daily_report_html(entries):
+    """
+    Build the full HTML page for daily_report.html: EVERY job fetched by
+    today's --daily run (see cli_run_daily()), no cap, ranked
+    highest-score-first, each with its score, source (color-coded
+    badge), verdict/flags, and a big "Open job" link straight to the
+    original posting. No proposal/cover-letter section and no
+    "apply"/"submit" button anywhere on this page - see the note on
+    manual applying in the README.
+    """
+    generated_at_str = datetime.datetime.now().strftime("%B %d, %Y at %H:%M")
+
+    if entries:
+        cards_html = "".join(build_daily_job_card_html(entry) for entry in entries)
+    else:
+        cards_html = '<p class="empty-state">No new, fresh jobs today - check back after the next --fetch.</p>'
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Daily Fresh Job Matches</title>
+<style>
+    * {{
+        box-sizing: border-box;
+    }}
+    body {{
+        font-family: "Segoe UI", Arial, Helvetica, sans-serif;
+        background-color: #f4f5f7;
+        color: #22262b;
+        max-width: 820px;
+        margin: 40px auto;
+        padding: 0 20px 60px 20px;
+        line-height: 1.5;
+    }}
+    .page-header {{
+        margin-bottom: 32px;
+    }}
+    h1 {{
+        font-size: 26px;
+        margin: 0 0 6px 0;
+    }}
+    .generated-at {{
+        font-size: 13px;
+        color: #777;
+        margin: 0 0 4px 0;
+    }}
+    .manual-note {{
+        font-size: 13px;
+        color: #8a6215;
+        background-color: #fff8e6;
+        border-left: 4px solid #d9a441;
+        border-radius: 6px;
+        padding: 8px 14px;
+        margin-top: 14px;
+    }}
+    .card {{
+        background-color: #ffffff;
+        border: 1px solid #e2e2e2;
+        border-radius: 10px;
+        padding: 20px 22px;
+        margin-bottom: 16px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+    }}
+    .card-header {{
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 15px;
+        font-weight: 600;
+    }}
+    .rank {{
+        color: #888;
+    }}
+    .score {{
+        font-size: 21px;
+        font-weight: 700;
+    }}
+    .badges-row {{
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+    }}
+    .source-badge {{
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: #ffffff;
+        border-radius: 4px;
+        padding: 2px 8px;
+    }}
+    .unknown-date-badge {{
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 600;
+        color: #8a6215;
+        background-color: #fff3d6;
+        border-radius: 4px;
+        padding: 2px 8px;
+    }}
+    .job-title {{
+        font-size: 17px;
+        font-weight: 600;
+        margin: 10px 0 4px 0;
+    }}
+    .metadata {{
+        font-size: 13px;
+        color: #666;
+        margin: 0 0 10px 0;
+    }}
+    .verdict {{
+        margin: 0 0 10px 0;
+        color: #444;
+    }}
+    .flags-box {{
+        background-color: #fff8e6;
+        border-left: 4px solid #d9a441;
+        border-radius: 6px;
+        padding: 10px 16px;
+        margin: 10px 0;
+        font-size: 13px;
+        color: #6b4e14;
+    }}
+    .flags-label {{
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: #8a6215;
+        margin-bottom: 4px;
+    }}
+    .flags-box ul {{
+        margin: 0;
+        padding-left: 18px;
+    }}
+    .open-job-button {{
+        display: inline-block;
+        margin-top: 14px;
+        padding: 10px 18px;
+        font-size: 14px;
+        font-weight: 700;
+        color: #ffffff;
+        background-color: #1a5fb4;
+        border-radius: 6px;
+        text-decoration: none;
+    }}
+    .open-job-button:hover {{
+        background-color: #164d92;
+    }}
+    .empty-state {{
+        color: #666;
+    }}
+</style>
+</head>
+<body>
+    <div class="page-header">
+        <h1>Daily Fresh Job Matches</h1>
+        <p class="generated-at">Generated {generated_at_str}</p>
+        <p class="manual-note">Scores and verdicts only - no cover letters drafted in this
+        flow. Open a job's link and apply yourself on the original board;
+        nothing here applies automatically.</p>
+    </div>
+    {cards_html}
+</body>
+</html>
+"""
+
+
+def cli_fetch_jobs():
+    """
+    Handle `python match_llm.py --fetch`: pull jobs from every source in
+    sources.SOURCE_FETCHERS (RemoteOK, Remotive, ...), append any new
+    ones to jobs.json, and print a per-source summary (found / kept /
+    skipped as duplicates). Never touches results.json or report.html -
+    scoring only happens in run_scoring_and_report() (see --daily, or a
+    plain `python match_llm.py` run afterward).
+
+    Returns the list of newly added job dicts, so cli_run_daily() can
+    report on them too without re-fetching.
+    """
+    jobs = load_jobs(JOBS_JSON_FILE)
+
+    print("Fetching from automatic sources...")
+    new_jobs, stats = sources.fetch_all_jobs(jobs)
+
+    if new_jobs:
+        jobs.extend(new_jobs)
+        save_jobs(jobs)
+
+    print("\n===== Fetch summary =====")
+    for source_name, source_stats in stats.items():
+        print(
+            f"{source_name}: {source_stats['found']} found, "
+            f"{source_stats['keyword_matched']} matched keywords, "
+            f"{source_stats['fresh']} also fresh (<= {sources.MAX_JOB_AGE_DAYS}d old), "
+            f"{source_stats['duplicates']} already in {JOBS_JSON_FILE}, "
+            f"{source_stats['added']} newly added"
+        )
+    print(f"\nTotal new jobs added: {len(new_jobs)}")
+
+    return new_jobs
+
+
+def cli_run_daily():
+    """
+    Handle `python match_llm.py --daily`: the full end-to-end daily
+    workflow.
+        1. Fetch new jobs from every automatic source (cli_fetch_jobs()).
+           sources.py already restricts what it returns to postings from
+           the last sources.MAX_JOB_AGE_DAYS days (see
+           sources.freshness_status()).
+        2. Score any unscored jobs, reusing results.json for everything
+           else (run_scoring_and_report(use_cache=True) only ever calls
+           Ollama for jobs missing from the cache - once the very first
+           backlog is cleared, a normal day is a handful of fresh
+           postings across 7 boards, not the whole job history, so this
+           finishes quickly). draft_proposals=False here on purpose - no
+           cover letters in this flow, see that parameter's docstring on
+           run_scoring_and_report().
+        3. Write daily_report.html: every automatically-sourced job whose
+           "saved_at" is newer than LAST_DAILY_RUN_FILE's cutoff, ranked
+           highest-score-first - no top-N cap. This is a WALL-CLOCK
+           cutoff, not "whatever this run's own fetch step just added" -
+           see LAST_DAILY_RUN_FILE's comment for why that distinction
+           matters for a run that gets interrupted mid-way.
+        4. Print a short terminal summary.
+
+    This NEVER submits anything anywhere - see the README's note on why
+    applying stays a manual, human step.
+    """
+    cutoff = load_last_daily_cutoff()
+    run_started_at = datetime.datetime.now().isoformat(timespec="seconds")
+
+    print("=== Step 1/3: fetching new, fresh jobs ===")
+    cli_fetch_jobs()
+
+    print("\n=== Step 2/3: scoring today's new jobs (no proposal drafting - scores only) ===")
+    run_scoring_and_report(use_cache=True, draft_proposals=False)
+
+    print("\n=== Step 3/3: writing daily_report.html ===")
+    jobs = load_jobs(JOBS_JSON_FILE)
+    results_cache = load_results()
+
+    entries = []
+    for job in jobs:
+        if "freshness" not in job:
+            continue  # not from an automatic source (e.g. the manual Upwork-extension flow) - out of scope here
+        if job.get("saved_at", "") <= cutoff:
+            continue  # already covered by an earlier --daily report
+
+        job_text = job.get("text", "")
+        job_hash = hash_job_text(job_text)
+        cached = results_cache.get(job_hash)
+        if not cached:
+            continue  # scoring must have failed for this one - skip it rather than show a fake entry
+
+        title, metadata = extract_title_and_metadata(job_text)
+        entries.append(
+            {
+                "title": title,
+                "metadata": metadata,
+                "score": cached["score"],
+                "verdict": cached["verdict"],
+                "flags": cached.get("flags", []),
+                "url": job.get("url", ""),
+                "source": job.get("source", "upwork-extension"),
+                "freshness": job.get("freshness", "unknown"),
+            }
+        )
+
+    entries.sort(key=lambda entry: -entry["score"])
+    for rank, entry in enumerate(entries, start=1):
+        entry["rank"] = rank
+
+    daily_report_html = build_daily_report_html(entries)
+    with open(DAILY_REPORT_FILE, "w", encoding="utf-8") as f:
+        f.write(daily_report_html)
+
+    # Only advance the cutoff after the report has actually been written,
+    # so a crash earlier in this function (e.g. Ollama unreachable during
+    # scoring) leaves the cutoff untouched - the next run will still pick
+    # up everything since the LAST successful report, not silently skip it.
+    save_last_daily_cutoff(run_started_at)
+
+    print(f"\n===== Today's fresh jobs (see {DAILY_REPORT_FILE}) =====")
+    if not entries:
+        print("No new, fresh jobs since the last report.")
+    for entry in entries:
+        print(f"#{entry['rank']} [{entry['score']}/100] {entry['title']}  ({entry['source']})")
+        if entry["url"]:
+            print(f"   {entry['url']}")
+
+    print(f"\nHTML digest saved to {DAILY_REPORT_FILE}")
+    print("Open each link and apply yourself - nothing is auto-applied and no proposals were drafted in this flow.")
+
+
 # The `if __name__ == "__main__":` line below means: "only run this code
 # when this file is executed directly (e.g. `python match_llm.py`), not
 # when it's imported by another file."
@@ -1093,12 +1769,22 @@ def build_report():
     return results_by_date, sorted_dates
 
 
-def run_scoring_and_report(use_cache):
+def run_scoring_and_report(use_cache, draft_proposals=True):
     """
     The main pipeline: score every job in jobs.json (reusing cached
     results from results.json unless `use_cache` is False), then hand
     off to build_report() to group everything by date, write
     report.html, and print a terminal summary.
+
+    `draft_proposals` controls whether high-scoring jobs also get a
+    drafted cover letter (an extra, slower Ollama call per job). The
+    manual Upwork extension flow (a plain `python match_llm.py` run)
+    wants that - see report.html's proposal boxes. --daily's automatic
+    job-board flow explicitly does NOT: with potentially dozens of fresh
+    postings across 7 sources every run, drafting a proposal for every
+    one of them would turn a "few seconds" daily check back into a
+    multi-minute one, and the user reviews/writes their own note before
+    applying anyway - see cli_run_daily().
     """
     jobs = load_jobs(JOBS_JSON_FILE)
     results_cache = load_results()
@@ -1142,10 +1828,24 @@ def run_scoring_and_report(use_cache):
         if computed_score is not None:
             score = computed_score
 
+        # Code-level gates - role type (hard cap), seniority (soft
+        # penalty) - see apply_score_adjustments() above for why these
+        # are enforced in code rather than trusted to the model's own
+        # judgment. Location is a flag only, added to `flags` below -
+        # never affects the score.
+        domain_fit = parse_domain_fit(raw_reply)
+        score = apply_score_adjustments(score, domain_fit, title, job_text)
+
+        location_warning = location_flag(job_text)
+        if location_warning:
+            flags = flags + [location_warning]
+
         # Only draft a proposal for high-scoring jobs - it's not worth
-        # spending the model's (or the client's) time on a poor fit.
+        # spending the model's (or the client's) time on a poor fit. And
+        # only if the caller actually wants proposals at all (--daily
+        # doesn't - see the draft_proposals docstring above).
         proposal = None
-        if score >= PROPOSAL_SCORE_THRESHOLD:
+        if draft_proposals and score >= PROPOSAL_SCORE_THRESHOLD:
             proposal = draft_proposal(job_text)
 
         results_cache[job_hash] = {
@@ -1156,8 +1856,16 @@ def run_scoring_and_report(use_cache):
             "flags": flags,
         }
 
-    # Persist the (possibly updated) cache so future runs - and
-    # build_report() below - can see today's results too.
+        # Save after EVERY job, not just once at the end - a full run can
+        # take a long time (dozens of jobs x ~70s of Ollama calls each),
+        # and without this, an interrupted run (crash, Ctrl+C, killed
+        # process) would lose every score computed so far, forcing a
+        # full re-score from scratch on the next attempt.
+        save_results(results_cache)
+
+    # Everything is already saved incrementally above; this final call is
+    # a harmless no-op when the loop ran to completion (results_cache is
+    # already on disk), and a no-op when it was empty (nothing to save).
     save_results(results_cache)
 
     results_by_date, sorted_dates = build_report()
@@ -1183,9 +1891,28 @@ def run_scoring_and_report(use_cache):
 
 
 if __name__ == "__main__":
+    # Job titles/descriptions can contain arbitrary Unicode (accented
+    # names, em dashes, etc.) - especially now that sources.py pulls jobs
+    # in automatically instead of everything being hand-typed/pasted.
+    # Some terminals (observed here: a Windows console defaulting to the
+    # cp1256 codepage) can't encode certain of those characters, which
+    # crashes a plain print() mid-run. Reconfiguring stdout/stderr to
+    # UTF-8 with errors="replace" makes every print() in this file safe
+    # regardless of the terminal's own codepage, without changing what
+    # gets printed on a terminal that already handles UTF-8 fine.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
+        pass  # very old Python without TextIOWrapper.reconfigure() - just skip
+
     cli_args = sys.argv[1:]
 
-    if "--list" in cli_args:
+    if "--fetch" in cli_args:
+        cli_fetch_jobs()
+    elif "--daily" in cli_args:
+        cli_run_daily()
+    elif "--list" in cli_args:
         cli_list_jobs()
     elif "--delete" in cli_args:
         delete_flag_index = cli_args.index("--delete")

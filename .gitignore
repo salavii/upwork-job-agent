@@ -7,6 +7,12 @@ __pycache__/
 jobs.json
 results.json
 report.html
+daily_report.html
+last_daily_run.json
+jobs_backup.json
+results_backup.json
+daily_run_log.txt
+ollama_serve_log.txt
 
 # Old plain-text job log format (superseded by jobs.json), in case it
 # still exists locally from an earlier version of this project.
@@ -15,4 +21,7 @@ jobs.txt
 # Local/env files
 .env
 *.local
-.claude/settings.local.json
+.claude/
+
+# Local test/scratch logs from ad-hoc runs during development.
+daily_run_manual_test*.txt

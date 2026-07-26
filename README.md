@@ -1,163 +1,131 @@
-# Upwork Job Matcher & Proposal Drafter
+# ML/AI Job Agent
 
-A semi-automatic pipeline that scores Upwork job postings against your
-skills using a **local LLM**, ranks them, flags red flags (like a $10
-budget for a multi-month build), and drafts honest first-draft proposals
-for the jobs worth applying to — all running on your own machine, with
-nothing auto-submitted and no scraping of Upwork.
+A personal job-hunting agent for ML/AI/data-science roles: it **finds**
+jobs automatically from seven public job boards, **scores** every one
+against your real resume using a **local LLM** (nothing leaves your
+machine), applies a set of hard-coded fit gates tuned from real testing
+(role type, seniority, location, freshness), and hands you a clean,
+ranked HTML report with direct links — every morning, on a schedule, with
+zero manual browsing.
 
-You still click "save" on jobs you're looking at, and you still click
-"submit" on Upwork yourself. This tool just does the reading, scoring,
-and first-draft writing in between.
+It also supports a second, fully manual path: a Chrome extension that
+saves individual Upwork postings you're already looking at, scored the
+same way, with an honest first-draft proposal for the ones worth
+applying to.
+
+**Nothing here ever submits an application.** Every flag, cap, and
+report stops at "here's what I found, ranked, with a link" — you read,
+decide, and click apply yourself. See [Applying stays
+manual](#applying-stays-manual) for why that's permanent, not a
+missing feature.
 
 ## What it does
 
-1. A small Chrome extension grabs the title, metadata, and description of
-   whatever Upwork job page you're currently looking at.
-2. A local Python server saves it to a JSON file, skipping duplicates.
-3. A local LLM (via [Ollama](https://ollama.com), running entirely on
-   your machine) scores each job against your profile, breaks the job
-   into its main skill components, and estimates what fraction of it you
-   could realistically deliver alone.
-4. For jobs that score well, it drafts a short, honest proposal — grounded
-   only in skills/projects that actually exist in your profile.
-5. Everything is rendered into a ranked, color-coded HTML report you can
-   open in a browser, with a one-click delete button per job.
+1. **Finds jobs automatically.** `src/sources.py` pulls current listings
+   from 7 public, official job-board APIs/feeds — no scraping, no login
+   bypass. See [Automatic sources](#automatic-sources) below.
+2. **Filters for relevance and freshness.** Keyword-matches for ML/AI/
+   data-science work, keeps only jobs posted in the last couple of days,
+   and drops postings that are actually dead ("no open roles").
+3. **Scores every job against your real resume**, using a local LLM (via
+   [Ollama](https://ollama.com)) that breaks each posting into its main
+   skill components and judges what fraction of it you could realistically
+   deliver — not just "does a keyword match."
+4. **Applies hard-coded fit gates** on top of the model's own judgment,
+   because testing showed the model alone isn't reliable enough — see
+   [Scoring gates](#scoring-gates) below.
+5. **Writes a ranked HTML report** (`daily_report.html`) — every fresh,
+   relevant job, highest score first, each with its score, verdict,
+   flags, source, and a direct link to the original posting.
+6. **Runs unattended on a schedule** (Windows Task Scheduler, 3x/day out
+   of the box) so the report is just waiting for you.
+7. **(Optional, manual)** A Chrome extension + local server let you save
+   individual Upwork postings you're already viewing, scored the same
+   way, with a drafted first-pass proposal for strong matches.
 
-Nothing here auto-applies to jobs, auto-browses Upwork, or scrapes pages
-you haven't opened yourself — see [ToS-safe by design](#tos-safe-by-design)
-below for why that mattered.
+## Automatic sources
 
-## Architecture
+`src/sources.py` pulls jobs from seven public job boards — only
+documented, official, public endpoints/feeds, nothing that requires
+scraping, an API key, or bypassing a login:
 
-```
-┌─────────────────────┐   click "Save this job"   ┌─────────────────────┐
-│  Chrome Extension    │ ─────────────────────────▶│      server.py       │
-│  (content.js scrapes │   POST /save_job           │  localhost:8765      │
-│   the current page,  │   { job_text }              │  - dedup check       │
-│   popup.js sends it) │                            │  - writes jobs.json  │
-└─────────────────────┘                            └──────────┬───────────┘
-                                                                │
-                                                                ▼
-                                                        ┌───────────────┐
-                                                        │   jobs.json    │  (your saved jobs)
-                                                        └───────┬────────┘
-                                                                │ read
-                                                                ▼
-                                                     ┌────────────────────┐        ┌───────────────────────┐
-                                                     │    match_llm.py     │◀──────▶│        Ollama          │
-                                                     │  score_job()         │        │  llama3.1:8b, running  │
-                                                     │  draft_proposal()    │        │  locally on :11434     │
-                                                     └──────────┬──────────┘        └───────────────────────┘
-                                                                │ reads/writes
-                                                                ▼
-                                                        ┌───────────────┐
-                                                        │ results.json   │  (score/verdict/proposal cache,
-                                                        └───────┬────────┘   keyed by a hash of the job text)
-                                                                │ writes
-                                                                ▼
-                                                        ┌────────────────┐
-                                                        │  report.html    │  ranked, color-coded, with a
-                                                        └───────┬────────┘   🗑 delete button per job
-                                                                │
-                                                    click delete → POST /delete_job → server.py removes
-                                                    the job from jobs.json + results.json, then calls
-                                                    match_llm.build_report() to rebuild report.html
-                                                    (no re-scoring, no Ollama call)
-```
+| Source | Endpoint |
+|---|---|
+| RemoteOK | `https://remoteok.com/api` (public JSON) |
+| Remotive | `https://remotive.com/api/remote-jobs` (public JSON) |
+| Arbeitnow | `https://www.arbeitnow.com/api/job-board-api` (public JSON) |
+| Himalayas | `https://himalayas.app/jobs/api` (public JSON) |
+| Jobicy | `https://jobicy.com/api/v2/remote-jobs` (public JSON) |
+| The Muse | `https://www.themuse.com/api/public/jobs` (public JSON) |
+| WeWorkRemotely | `https://weworkremotely.com/categories/remote-programming-jobs.rss` (public RSS) |
 
-There's also a standalone baseline, `match.py`, which scores jobs with
-plain keyword matching and no LLM at all — kept around deliberately (see
-below).
+Boards considered and **skipped** for not having a genuinely public/free
+API: Adzuna (requires a registered API key), GitHub Jobs (discontinued),
+LinkedIn/Indeed (no public job-search API for third parties).
 
-## Engineering decisions — and why
+To add another source: write one `fetch_<name>()` function returning
+normalized job dicts and add it to `SOURCE_FETCHERS` at the bottom of
+`sources.py` — nothing else needs to change.
 
-This project went through several real iterations, not a single design
-pass. The decisions below are the ones that actually mattered.
+**Relevance filtering.** `KEYWORD_PATTERNS` (a config constant at the top
+of `sources.py`) lists the ML/AI terms to look for: machine learning, ML,
+deep learning, AI, LLM, large language model, NLP, RAG, computer vision,
+PyTorch, TensorFlow, fine-tuning, prompt engineering, Hugging Face, data
+scientist, model training, embeddings, vector database, and more. A
+single keyword hit anywhere in a long description let through a lot of
+unrelated roles that mentioned "AI" once in passing, so `is_relevant()`
+requires EITHER a match in the job's TITLE, OR at least two DISTINCT
+keywords matched in the full text.
 
-**Started with keyword matching, hit its ceiling fast.**
-`match.py` is a from-scratch keyword matcher: it looks for your skills as
-whole words/phrases in the job text and computes a percentage match. It's
-simple, fast, and fully deterministic — a good baseline. But it can't
-tell "the job needs FastAPI and I don't have it" from "the job needs
-FastAPI and I do" without a hardcoded skill list, and it has no way to
-judge *how much* of a large job you can actually deliver. It's kept in
-the repo as a deliberate point of comparison against the LLM-based
-version, not as dead code.
+**Freshness filtering.** Jobs older than `MAX_JOB_AGE_DAYS` (2 by
+default) are dropped — the whole point is fresh, low-competition
+postings, not a backlog already buried under other applicants. A job
+whose source gives no parseable date is kept but tagged `"unknown"`
+rather than silently lost.
 
-**Moved scoring to a local LLM once keyword matching couldn't reason
-about fit.** `match_llm.py` sends your profile and the job text to a
-local model (via Ollama) and asks it to act as a strict, skeptical
-judge — not an encouraging recruiter. Running locally means job
-descriptions (which can contain client-identifying detail) never leave
-your machine.
+**Dedup.** Every fetched job is deduped against everything already
+saved using TWO keys: an exact text hash, AND a normalized
+title+company key (catches the same real posting re-served with a
+slightly different description snapshot, which would otherwise slip
+through as a "new" job with a different exact hash).
 
-**`temperature=0` for scoring, `temperature=0.7` for proposals — on
-purpose, not a leftover default.** Scoring needs to be reproducible: the
-same job should get the same score every run, or the ranking becomes
-untrustworthy. Proposal drafting needs the opposite — some natural
-variation so proposals don't all read like the same template.
+**Dead-posting filter.** Postings that say there's no open role right
+now ("we don't currently have any open roles") are dropped entirely at
+fetch time.
 
-**The scoring rubric went through four real revisions**, each fixing a
-concrete failure observed in testing, not a hypothetical one:
-- v1 (no rubric) scored a job needing mostly backend/infra skills at
-  82/100, because it just checked "does *any* skill match" rather than
-  weighting how central the missing skills were.
-- v2 added strict weighting of mandatory requirements, but over-corrected —
-  it started penalizing gaps for skills the job never even asked for
-  (e.g. docking a computer-vision job for "no backend experience").
-- v3 fixed that by forcing the model to first extract what the job
-  *actually* requires, then only score against that extracted list.
-- v4 fixed a subtler bug: v3 still scored large, multi-skill jobs too
-  generously in the middle (a job needing 3D avatars, voice, a database,
-  and an installer scored 60, when the candidate could only deliver one
-  small slice of it). v4 forces the model to break the job into
-  components, judge each one, and score based on the *fraction* of
-  components it could deliver — a strong match on 1 of 5 unrelated
-  components now scores low, not medium.
+**Resilience.** Each source retries once on a transient network failure,
+then gives up gracefully — one source's outage never crashes the run or
+blocks any other source.
 
-**The score is computed in Python from the model's labels, not trusted
-from the model's own arithmetic.** An 8B local model can classify
-"can I do this component: yes/partial/no" reasonably reliably, but is
-not reliable at then doing the division to turn that into a percentage —
-in testing it wrote a fraction of "1 YES + 2 PARTIAL out of 12 = 0.583"
-when the correct answer is 0.167, and its self-reported score inherited
-that wrong number. The fix: ask the model only for the classification,
-then compute `score = round((yes + 0.5*partial) / total * 100)` in code,
-where the arithmetic is always correct. A regex-based filter also strips
-out components the model sometimes invents for administrative busywork
-("write documentation", "installation guide") before counting, since
-those aren't real engineering skill areas.
+## Scoring gates
 
-**Caching turned re-runs from ~70s/job to instant.** Every scored job is
-cached in `results.json`, keyed by a SHA-256 hash of its text. A normal
-run only calls Ollama for jobs that changed or are new — a re-run of 5
-already-scored jobs went from ~72 seconds to ~0.6 seconds (about **125x**
-faster). `--fresh` bypasses the cache entirely when the prompt itself
-changes and everything needs re-scoring.
+Testing repeatedly showed the local 8B model's own self-reported
+judgment isn't reliable enough to trust alone — a Gartner "AI Strategy"
+analyst role scored 100/100, a "Technical Recruiter" scored 75, because
+the model conflates "this text talks a lot about AI" with "this role IS
+AI engineering." So on top of the model's component-fraction scoring,
+these deterministic checks run in code:
 
-**Deleting a job rebuilds the report without re-scoring anything.**
-`match_llm.build_report()` is a pure function of the current
-`jobs.json` + `results.json` — it never calls Ollama. `server.py`'s
-`/delete_job` endpoint calls it directly after removing a job, so
-`report.html` reflects the deletion immediately (and the delete button
-in the browser just reloads the page to see it), without waiting for a
-full rescoring pass.
+| Gate | Type | What it catches |
+|---|---|---|
+| **Role type** | Hard cap (15) | Titles/content indicating management, sales, recruiting, accounting, marketing, "subject matter expert," solutions/sales/value engineer, consulting, customer success, etc. — genuinely not hands-on ML/AI engineering, regardless of how much AI vocabulary surrounds it. |
+| **Seniority** | Soft penalty (−12) | "Senior"/"Lead" titles, or a stated requirement of 5+ years — downweighted, not hidden, since this is a free board with no per-application cost and a strong-fitting senior role is still worth seeing. |
+| **Location/eligibility** | Flag only, no score effect | "US-based," "work authorization," "on-site," "security clearance," etc. — surfaced as an informational flag in the report so you can judge eligibility yourself. |
+| **Dead posting** | Dropped entirely | "We don't currently have any open roles" — not a real job. |
 
-### ToS-safe by design
+The role-type gate also has a **content-based backstop**: some
+non-engineering roles don't signal it in the title at all (e.g. a job
+that reads like business-process/consulting/customer-facing work), so
+the job's full text is checked too — but only when the title doesn't
+already contain a clear engineering word, so a real ML Engineer posting
+that mentions "customer-facing" once in passing isn't penalized for it.
 
-Upwork's Terms of Service prohibit automated scraping and automated
-proposal submission. This tool is built around that constraint, not
-around ignoring it:
-
-- The extension only reads the page you *already have open* — it never
-  navigates Upwork on its own, crawls search results, or fetches pages
-  in the background.
-- Saving a job is a manual click, every time.
-- Proposals are drafted, never submitted. You read, edit, and paste them
-  in yourself.
-
-If you fork this, keep it that way.
+All of these constants (`ROLE_TYPE_MISMATCH_PATTERN`,
+`SENIORITY_PENALTY_POINTS`, `LOCATION_RESTRICTION_PATTERN`,
+`MAX_JOB_AGE_DAYS`, `KEYWORD_PATTERNS`) are near the top of
+`src/match_llm.py`/`src/sources.py` and are meant to be tuned — they're
+the result of iterating against real, messy job-board data, not a fixed
+design.
 
 ## Setup
 
@@ -172,97 +140,140 @@ library):
 pip install requests
 ```
 
-**3. Edit your profile.** Open `match_llm.py` and replace `MY_PROFILE`
-and `MY_PROJECTS_BY_DOMAIN` with your own background — these are
-hardcoded on purpose, not read from a config file, so there's exactly
-one obvious place to look. Do the same for `MY_SKILLS` in `match.py` if
-you want to use the keyword-matching baseline too.
+**3. Edit your profile.** Open `src/match_llm.py` and replace
+`MY_PROFILE` and `MY_PROJECTS_BY_DOMAIN` with your own background,
+including honest weaknesses (the scorer is deliberately strict about
+gaps) — these are hardcoded on purpose, not read from a config file, so
+there's exactly one obvious place to look.
 
-**4. Start the local server:**
+**4. Run it:**
 ```
-python server.py
+python src/match_llm.py --daily
 ```
-This runs at `http://localhost:8765` and must stay running for both the
-extension (to save jobs) and the report (to delete jobs) to work.
+This fetches from all 7 sources, scores anything new, and writes
+`daily_report.html` — open it in a browser.
 
-**5. Load the browser extension:**
-- Open `chrome://extensions`, enable **Developer mode**
-- **Load unpacked** → select the `extension/` folder
+### (Optional) Manual Upwork extension
 
-**6. Capture jobs.** Open a real Upwork job posting, click the extension
-icon, click **Save this job**. Repeat for as many jobs as you want scored.
+If you also want to save individual Upwork postings you're browsing:
 
-**7. Score and generate the report:**
+1. **Start the local server:** `python src/server.py` (runs at
+   `http://localhost:8765`, must stay running for the extension to save
+   jobs and for the report's delete button to work).
+2. **Load the extension:** open `chrome://extensions`, enable **Developer
+   mode**, **Load unpacked** → select the `extension/` folder.
+3. **Capture jobs:** open a real Upwork job posting, click the extension
+   icon, click **Save this job**.
+4. **Score and generate the full report:** `python src/match_llm.py` —
+   writes `report.html` (every job ever saved/fetched, scored, with a
+   delete button per card).
+
+## CLI reference
+
 ```
-python match_llm.py
-```
-This writes `report.html` — open it in a browser. With `server.py`
-running, each job card's 🗑 delete button works and refreshes the report
-automatically.
-
-### CLI reference
-
-```
-python match_llm.py            # score any new jobs, reuse cached results, write report.html
-python match_llm.py --fresh    # ignore the cache, re-score every job from scratch
-python match_llm.py --list     # list all saved jobs with their index number
-python match_llm.py --delete N # delete job number N (from --list) and its cached result
+python src/match_llm.py            # score any new jobs, reuse cached results, write report.html
+python src/match_llm.py --fresh    # ignore the cache, re-score every job from scratch
+python src/match_llm.py --list     # list all saved jobs with their index number
+python src/match_llm.py --delete N # delete job number N (from --list) and its cached result
+python src/match_llm.py --fetch    # pull new jobs from all 7 boards, append to jobs.json
+python src/match_llm.py --daily    # fetch + score new jobs + write daily_report.html (no proposals, fast)
 ```
 
-### Example data format
+`--daily` is the main workflow: fetch → score anything unscored (reusing
+`results.json`, so a normal day is a handful of new postings, not a full
+re-score) → write `daily_report.html` covering every automatically-sourced
+job saved since the last successful report (a wall-clock cutoff in
+`last_daily_run.json`, not just "whatever this exact run's fetch added" —
+this survives a run that gets interrupted mid-way, e.g. Ollama not
+running yet, without silently dropping jobs from every future report).
 
-`jobs.json` (and your real `results.json`) are gitignored since they
-contain your saved job postings. See `jobs.example.json` for the exact
-shape `server.py` writes and `match_llm.py` expects — a JSON list of
-`{"text": ..., "date_added": "YYYY-MM-DD", "saved_at": "<ISO timestamp>"}`
-objects.
+## Running on a schedule (Windows Task Scheduler)
+
+`run_daily.bat` wraps `python src/match_llm.py --daily` for unattended runs:
+cds into the project directory, calls the real Python interpreter
+directly (not a PATH alias), runs with `-X utf8` so non-ASCII job titles
+never crash the run over a console codepage mismatch, checks whether
+Ollama is responding and starts it if not, and appends everything with
+timestamps to `daily_run_log.txt`.
+
+To schedule it 3x/day (9am, 2pm, 7pm):
+```
+schtasks /create /tn "MLJobAgent_Daily_9AM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 09:00 /f
+schtasks /create /tn "MLJobAgent_Daily_2PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 14:00 /f
+schtasks /create /tn "MLJobAgent_Daily_7PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 19:00 /f
+```
+Useful follow-ups: `schtasks /query /tn "..." /fo LIST /v` (check status),
+`schtasks /run /tn "..."` (trigger immediately, for testing),
+`schtasks /delete /tn "..." /f` (remove).
+
+## Applying stays manual
+
+This is deliberate, not a missing feature. `--daily` stops at "here are
+today's fresh, scored jobs, ranked, with direct links." It never opens a
+browser, never fills in a form, and never submits anything, anywhere.
+
+Automated application submission would violate most job boards' (and
+Upwork's) Terms of Service and risks accounts being banned — a risk not
+worth the marginal time saved. Reading the report, clicking through, and
+applying yourself is a permanent part of the workflow.
+
+The extension follows the same principle for Upwork specifically: it
+only reads the page you already have open (never navigates or crawls on
+its own), saving is a manual click every time, and drafted proposals are
+never submitted automatically — you read, edit, and paste them in
+yourself.
 
 ## Limitations
 
-Read this before trusting the output blindly:
-
 - **The local 8B model isn't perfect.** It occasionally skips the
-  structured component labels the scorer needs, in which case scoring
-  falls back to the model's own (less reliable) number. This is rare but
-  does happen — if a score looks obviously wrong, it might be one of
-  these cases.
-- **Scores are guidance, not gospel.** They're a fast first filter to
-  help you triage a long job list, not a replacement for reading the
-  posting yourself before applying.
-- **Proposals need human review.** They're grounded in your real profile
-  and won't invent skills you don't have, but they're a first draft —
-  read them, adjust the tone, and personalize before sending.
-- **Job extraction depends on Upwork's current page structure.** The
-  extension uses a chain of fallback CSS selectors and ultimately falls
-  back to grabbing the page's visible text if nothing matches, so it
-  degrades gracefully rather than failing outright — but a real Upwork
-  layout change could still affect field extraction (title vs.
-  description vs. metadata) until the selectors are updated.
-- **No automated test suite.** Everything here has been verified by
-  running it against real Ollama calls and real saved jobs, not by a CI
-  pipeline.
+  structured labels the scorer needs, falling back to a less reliable
+  self-reported number. The hard-coded gates exist specifically because
+  the model's own judgment on role fit wasn't trustworthy enough alone.
+- **Scores are guidance, not gospel.** A fast first filter to triage a
+  long job list, not a replacement for reading the posting yourself.
+- **The location/eligibility gate is a heuristic text search, not true
+  NLP** — it can't detect negation (e.g. "no work authorization
+  required" would still match "work authorization"), so treat the flag
+  as a prompt to go check, not a verdict.
+- **Job extraction (Upwork extension) depends on the current page
+  structure.** Falls back to grabbing visible text if selectors don't
+  match, so it degrades gracefully rather than failing outright.
+- **No automated test suite.** Verified by running against real Ollama
+  calls and real job-board data, not a CI pipeline.
 
 ## Tech stack
 
-- **Python 3** standard library only for `server.py` (`http.server`,
-  `json`, `hashlib`, `difflib`) — no framework, nothing to install to run
-  the server.
+- **Python 3**, standard library only for `src/server.py` (`http.server`,
+  `json`, `hashlib`, `difflib`).
 - **[requests](https://pypi.org/project/requests/)** — the one external
-  dependency, used by `match_llm.py` to call Ollama's local HTTP API.
+  dependency, used to call Ollama's local API and the job-board APIs.
 - **[Ollama](https://ollama.com)** running **llama3.1:8b** locally for
-  both scoring and proposal drafting.
-- **Chrome Extension, Manifest V3** — vanilla JavaScript, no build step,
-  no frameworks.
-- **Generated HTML report** — inline CSS and a small vanilla-JS script
-  block for the delete button, no external libraries or CDN dependencies.
+  scoring and proposal drafting — nothing sent to any external LLM API.
+- **Chrome Extension, Manifest V3** — vanilla JavaScript, no build step.
+- **Generated HTML report** — inline CSS and vanilla JS, no external
+  libraries or CDN dependencies.
 
 ## Project structure
 
 ```
-match.py             Baseline keyword-matching scorer (no LLM)
-match_llm.py          LLM-based scoring, proposal drafting, caching, report generation, CLI
-server.py             Local HTTP server: saves/deletes jobs, dedups, rebuilds the report on delete
-extension/            Chrome extension (Manifest V3) that captures the current Upwork job page
-jobs.example.json     Example shape of jobs.json, for anyone cloning this repo
-KNOWN_ISSUES.md        Known, low-priority rough edges
+src/
+  match_llm.py        Core scoring engine, gates, proposal drafting, caching, report/daily-digest, CLI
+  sources.py          Automatic job discovery from 7 public job-board APIs/feeds
+  server.py           Local HTTP server for the manual Upwork extension flow (save/delete jobs)
+  match.py            Deterministic keyword-matching baseline (no LLM) - kept as a comparison point
+extension/            Chrome extension (Manifest V3) for the manual Upwork flow
+run_daily.bat          Task Scheduler wrapper for unattended --daily runs
+jobs.example.json      Example shape of jobs.json, for anyone cloning this repo
+KNOWN_ISSUES.md         Known, low-priority rough edges
 ```
+
+`jobs.json`, `results.json`, `report.html`, `daily_report.html`,
+`last_daily_run.json`, and `daily_run_log.txt` are all gitignored
+(personal job data and generated output) — see `jobs.example.json` for
+the shape `src/server.py`/`src/sources.py` write.
+
+`match.py` is a from-scratch keyword matcher (looks for skills as
+whole words/phrases, computes a percentage match) — simple, fast, fully
+deterministic, but can't reason about *how much* of a large job you
+could actually deliver. Kept deliberately as a baseline to compare
+against the LLM-based scorer, not as dead code.
