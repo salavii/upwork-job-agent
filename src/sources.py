@@ -34,7 +34,7 @@ writes to jobs.json, plus three extra fields:
         "saved_at": "<ISO timestamp>",
         "source": "remoteok" | "remotive" | "arbeitnow" | "himalayas" | "jobicy" | "themuse" | "weworkremotely",
         "url": "https://... (link to the original posting)",
-        "freshness": "fresh" | "unknown",
+        "freshness": "active" | "expired",
     }
 The extra keys are additive - match_llm.py and server.py's existing code
 only ever reads "text"/"date_added" from a job dict, so older jobs (and
@@ -64,12 +64,16 @@ REQUEST_TIMEOUT_SECONDS = 15
 RETRY_ATTEMPTS = 2
 RETRY_BACKOFF_SECONDS = 2
 
-# Only jobs posted within this many days are kept - the whole point of
-# --daily is fresh, low-competition postings, not a backlog of listings
-# from weeks ago that are already buried under other applicants. A job
-# whose source doesn't expose a usable date at all is kept anyway (with
-# "freshness": "unknown") rather than dropped - see freshness_status().
-MAX_JOB_AGE_DAYS = 2
+# These are normal job boards, not Upwork - what matters is whether a
+# posting is STILL OPEN, not how recently it was posted (no "first to
+# apply wins" dynamic here). There is deliberately NO age-based cutoff
+# any more - a good job posted a week ago that's still listed is exactly
+# as valid as one posted today. Every source's API only returns
+# currently-listed postings in the first place, so a job is kept unless
+# the source gives concrete evidence it has expired - see
+# posting_status() below (currently only Himalayas exposes an
+# "expiryDate"; every other source has no such signal, so nothing there
+# is ever dropped for "staleness").
 
 # Only jobs whose title+description mention at least one of these are
 # kept - broad job-board feeds are mostly irrelevant noise (sales,
@@ -245,24 +249,29 @@ def parse_date_posted(date_str):
     return parsed.strftime("%Y-%m-%d") if parsed else None
 
 
-def freshness_status(date_str):
+def posting_status(expiry_timestamp=None):
     """
-    Classify a job's posted-date (already normalized to an ISO string by
-    the caller) as:
-      - "fresh":   posted within MAX_JOB_AGE_DAYS - keep it.
-      - "stale":   older than that - drop it, that's the whole point of
-        the freshness filter (fresh, low-competition postings only).
-      - "unknown": missing or unparseable - the source just doesn't
-        expose a reliable date. Kept (we'd rather show an unverified-date
-        job than silently lose a real match), but tagged so the report
-        never confuses it with a provably-fresh one.
-    """
-    posted_at = _parse_iso_datetime(date_str)
-    if posted_at is None:
-        return "unknown"
+    Classify whether a posting should be considered currently active:
+      - "expired": the source gave a concrete expiry timestamp and it's
+        already in the past - drop it, it's not a real open job anymore.
+      - "active":  everything else - no expiry info was given (the vast
+        majority of postings; these APIs only return currently-listed
+        jobs to begin with), or an expiry timestamp that's still in the
+        future.
 
-    age = datetime.datetime.now(datetime.timezone.utc) - posted_at
-    return "fresh" if age <= datetime.timedelta(days=MAX_JOB_AGE_DAYS) else "stale"
+    `expiry_timestamp` is a raw Unix timestamp (seconds) if the source
+    provides one (currently only Himalayas' "expiryDate" - see
+    fetch_himalayas()), or None otherwise.
+    """
+    if expiry_timestamp:
+        try:
+            expires_at = datetime.datetime.fromtimestamp(float(expiry_timestamp), tz=datetime.timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return "active"
+        if expires_at < datetime.datetime.now(datetime.timezone.utc):
+            return "expired"
+
+    return "active"
 
 
 def hash_job_text(job_text):
@@ -304,7 +313,9 @@ def normalize_company_title_key(job_text):
     return f"{normalize(title)}::{normalize(company)}"
 
 
-def build_normalized_job(*, title, company, location_or_type, description, url, source, date_posted=None):
+def build_normalized_job(
+    *, title, company, location_or_type, description, url, source, date_posted=None, expiry_timestamp=None
+):
     """
     Build one job dict in the exact shape jobs.json expects (see the
     module docstring above). "text" is built as
@@ -312,7 +323,8 @@ def build_normalized_job(*, title, company, location_or_type, description, url, 
     match_llm.py's extract_title_and_metadata() expects (title = first
     line). `date_posted` must already be an ISO-ish string (or None) -
     each fetch_*() converts its source's native date format before
-    calling this.
+    calling this. `expiry_timestamp` is a raw Unix timestamp (seconds)
+    if the source provides one - see posting_status().
     """
     title = (title or "Untitled").strip()
     company = (company or "Unknown company").strip()
@@ -329,7 +341,7 @@ def build_normalized_job(*, title, company, location_or_type, description, url, 
         "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
         "source": source,
         "url": url or "",
-        "freshness": freshness_status(date_posted),
+        "freshness": posting_status(expiry_timestamp),
     }
 
 
@@ -346,13 +358,14 @@ def fetch_remoteok():
     blob (no "position"/"company" keys), not a real job - skipped below.
 
     Returns (jobs, funnel_stats): `jobs` is the list of normalized jobs
-    that passed BOTH the keyword-relevance filter and the freshness
-    filter (fresh or unknown-date, never stale). `funnel_stats` is
+    that passed the keyword-relevance filter (RemoteOK exposes no expiry
+    info, so nothing is ever dropped here for being "stale" - see the
+    module-level note on posting_status()). `funnel_stats` is
     {"found": N, "keyword_matched": M} - N is how many real listings the
-    API returned in total, M is how many matched a keyword (regardless of
-    age) - used for the --fetch summary. Returns ([], funnel) with zeroed
-    counts if the request fails for any reason - one source failing must
-    never crash the run.
+    API returned in total, M is how many matched a keyword - used for the
+    --fetch summary. Returns ([], funnel) with zeroed counts if the
+    request fails for any reason - one source failing must never crash
+    the run.
     """
     try:
         response = _get("https://remoteok.com/api")
@@ -389,7 +402,7 @@ def fetch_remoteok():
             continue
         keyword_matched += 1
 
-        if job["freshness"] != "stale":
+        if job["freshness"] != "expired":
             jobs.append(job)
 
     return jobs, {"found": found, "keyword_matched": keyword_matched}
@@ -433,7 +446,7 @@ def fetch_remotive():
             continue
         keyword_matched += 1
 
-        if job["freshness"] != "stale":
+        if job["freshness"] != "expired":
             jobs.append(job)
 
     return jobs, {"found": found, "keyword_matched": keyword_matched}
@@ -483,7 +496,7 @@ def fetch_arbeitnow():
             continue
         keyword_matched += 1
 
-        if job["freshness"] != "stale":
+        if job["freshness"] != "expired":
             jobs.append(job)
 
     return jobs, {"found": found, "keyword_matched": keyword_matched}
@@ -494,8 +507,12 @@ def fetch_himalayas():
     Fetch current listings from Himalayas' public jobs API
     (https://himalayas.app/jobs/api - no API key required).
 
-    Note: "pubDate" is a Unix timestamp in SECONDS, not an ISO string -
-    converted via _epoch_to_iso() before freshness/date handling.
+    Note: "pubDate" and "expiryDate" are Unix timestamps in SECONDS, not
+    ISO strings - "pubDate" is converted via _epoch_to_iso() for display,
+    and "expiryDate" is passed straight through to build_normalized_job()
+    as expiry_timestamp - this is the ONE source among the seven that
+    exposes real expiry info, so it's the only one that can actually
+    drop an expired listing (see posting_status()).
 
     Returns (jobs, funnel_stats) with the same meaning as
     fetch_remoteok().
@@ -527,13 +544,14 @@ def fetch_himalayas():
             url=raw_job.get("applicationLink") or raw_job.get("guid") or "",
             source="himalayas",
             date_posted=date_posted,
+            expiry_timestamp=raw_job.get("expiryDate"),
         )
 
         if not is_relevant(job["text"]) or is_dead_posting(job["text"]):
             continue
         keyword_matched += 1
 
-        if job["freshness"] != "stale":
+        if job["freshness"] != "expired":
             jobs.append(job)
 
     return jobs, {"found": found, "keyword_matched": keyword_matched}
@@ -578,16 +596,15 @@ def fetch_jobicy():
             continue
         keyword_matched += 1
 
-        if job["freshness"] != "stale":
+        if job["freshness"] != "expired":
             jobs.append(job)
 
     return jobs, {"found": found, "keyword_matched": keyword_matched}
 
 
-# The Muse's public API requires a category and doesn't reliably sort by
-# recency, so we check a couple of broad categories most likely to
-# contain ML/AI/data roles - is_relevant() + the freshness filter still
-# do the real work of narrowing this down.
+# The Muse's public API requires a category, so we check a couple of
+# broad categories most likely to contain ML/AI/data roles - is_relevant()
+# still does the real work of narrowing this down.
 THE_MUSE_CATEGORIES = ["Software Engineering", "Data and Analytics"]
 
 
@@ -635,7 +652,7 @@ def fetch_themuse():
                 continue
             keyword_matched += 1
 
-            if job["freshness"] != "stale":
+            if job["freshness"] != "expired":
                 jobs.append(job)
 
     return jobs, {"found": found, "keyword_matched": keyword_matched}
@@ -709,7 +726,7 @@ def fetch_weworkremotely():
             continue
         keyword_matched += 1
 
-        if job["freshness"] != "stale":
+        if job["freshness"] != "expired":
             jobs.append(job)
 
     return jobs, {"found": found, "keyword_matched": keyword_matched}
@@ -746,18 +763,19 @@ def fetch_all_jobs(existing_jobs):
       produce a different exact hash and slip through as a "new" job.
 
     `stats` is a dict keyed by source name:
-        {"remoteok": {"found": N, "keyword_matched": K, "fresh": M, "duplicates": D, "added": A}, ...}
+        {"remoteok": {"found": N, "keyword_matched": K, "active": M, "duplicates": D, "added": A}, ...}
     - "found": total real listings the source returned.
-    - "keyword_matched": how many of those matched an ML/AI keyword,
-      regardless of age.
-    - "fresh": how many of the keyword-matched jobs were ALSO fresh or
-      unknown-date (i.e. NOT filtered out as stale) - this is what
-      actually gets considered for jobs.json.
+    - "keyword_matched": how many of those matched an ML/AI keyword.
+    - "active": how many of the keyword-matched jobs are still an active
+      listing (i.e. NOT dropped as expired - see posting_status()) - this
+      is what actually gets considered for jobs.json. For every source
+      except Himalayas this always equals "keyword_matched", since only
+      Himalayas exposes real expiry info to drop postings by.
     - "duplicates": how many of those were already in jobs.json (by
       either dedup key) OR already added by an earlier source in this
       same run (cross-source dedup - the same posting on two boards only
       gets added once).
-    - "added": fresh AND relevant AND new (== len of what actually gets
+    - "added": active AND relevant AND new (== len of what actually gets
       appended).
 
     A single source raising an unexpected exception (network hiccup, API
@@ -773,14 +791,14 @@ def fetch_all_jobs(existing_jobs):
 
     for source_name, fetch_function in SOURCE_FETCHERS.items():
         try:
-            fresh_relevant_jobs, funnel_stats = fetch_function()
+            active_relevant_jobs, funnel_stats = fetch_function()
         except Exception as error:  # noqa: BLE001 - one bad source must not crash --fetch/--daily
             print(f"[{source_name}] unexpected error, skipping this source: {error}")
-            fresh_relevant_jobs, funnel_stats = [], _empty_funnel()
+            active_relevant_jobs, funnel_stats = [], _empty_funnel()
 
         duplicates = 0
         added = 0
-        for job in fresh_relevant_jobs:
+        for job in active_relevant_jobs:
             job_hash = hash_job_text(job["text"])
             job_key = normalize_company_title_key(job["text"])
             if job_hash in seen_hashes_this_run or (job_key is not None and job_key in seen_keys_this_run):
@@ -795,7 +813,7 @@ def fetch_all_jobs(existing_jobs):
         stats[source_name] = {
             "found": funnel_stats["found"],
             "keyword_matched": funnel_stats["keyword_matched"],
-            "fresh": len(fresh_relevant_jobs),
+            "active": len(active_relevant_jobs),
             "duplicates": duplicates,
             "added": added,
         }

@@ -4,9 +4,9 @@ A personal job-hunting agent for ML/AI/data-science roles: it **finds**
 jobs automatically from seven public job boards, **scores** every one
 against your real resume using a **local LLM** (nothing leaves your
 machine), applies a set of hard-coded fit gates tuned from real testing
-(role type, seniority, location, freshness), and hands you a clean,
-ranked HTML report with direct links — every morning, on a schedule, with
-zero manual browsing.
+(role type, seniority, job type, location/eligibility), and hands you a
+clean, ranked HTML report with direct links — every morning, on a
+schedule, with zero manual browsing.
 
 It also supports a second, fully manual path: a Chrome extension that
 saves individual Upwork postings you're already looking at, scored the
@@ -24,9 +24,11 @@ missing feature.
 1. **Finds jobs automatically.** `src/sources.py` pulls current listings
    from 7 public, official job-board APIs/feeds — no scraping, no login
    bypass. See [Automatic sources](#automatic-sources) below.
-2. **Filters for relevance and freshness.** Keyword-matches for ML/AI/
-   data-science work, keeps only jobs posted in the last couple of days,
-   and drops postings that are actually dead ("no open roles").
+2. **Filters for relevance and active listings.** Keyword-matches for
+   ML/AI/data-science work, keeps any job still actively listed
+   (regardless of how long ago it was posted — this isn't Upwork, there's
+   no "first to apply wins"), and drops postings that are actually dead
+   ("no open roles").
 3. **Scores every job against your real resume**, using a local LLM (via
    [Ollama](https://ollama.com)) that breaks each posting into its main
    skill components and judges what fraction of it you could realistically
@@ -80,11 +82,16 @@ unrelated roles that mentioned "AI" once in passing, so `is_relevant()`
 requires EITHER a match in the job's TITLE, OR at least two DISTINCT
 keywords matched in the full text.
 
-**Freshness filtering.** Jobs older than `MAX_JOB_AGE_DAYS` (2 by
-default) are dropped — the whole point is fresh, low-competition
-postings, not a backlog already buried under other applicants. A job
-whose source gives no parseable date is kept but tagged `"unknown"`
-rather than silently lost.
+**Active-listing filtering, not age filtering.** These are normal job
+boards, not Upwork — there's no "first to apply wins" dynamic, so what
+matters is whether a posting is still open, not how recently it was
+posted. There is deliberately no age cutoff: a good job posted a week
+ago that's still listed is exactly as valid as one posted today. Every
+source's API only returns currently-listed postings in the first place,
+so a job is kept unless the source gives concrete evidence it has
+expired — currently only Himalayas exposes a real expiry timestamp
+(`expiryDate`); every other source has no such signal, so nothing there
+is ever dropped for staleness.
 
 **Dedup.** Every fetched job is deduped against everything already
 saved using TWO keys: an exact text hash, AND a normalized
@@ -113,7 +120,8 @@ these deterministic checks run in code:
 |---|---|---|
 | **Role type** | Hard cap (15) | Titles/content indicating management, sales, recruiting, accounting, marketing, "subject matter expert," solutions/sales/value engineer, consulting, customer success, etc. — genuinely not hands-on ML/AI engineering, regardless of how much AI vocabulary surrounds it. |
 | **Seniority** | Soft penalty (−12) | "Senior"/"Lead" titles, or a stated requirement of 5+ years — downweighted, not hidden, since this is a free board with no per-application cost and a strong-fitting senior role is still worth seeing. |
-| **Location/eligibility** | Flag only, no score effect | "US-based," "work authorization," "on-site," "security clearance," etc. — surfaced as an informational flag in the report so you can judge eligibility yourself. |
+| **Full-time employee** | Soft penalty (−10) + flag, config-driven | Postings that read as permanent full-time EMPLOYEE roles (as opposed to contract/freelance/part-time) — only active if `config.json`'s `work_eligibility.full_time_employee_ok` is `false`; a no-op for anyone who hasn't set that. See [Work eligibility](#work-eligibility) below. |
+| **Location/eligibility** | Flag only, no score effect | On-site/citizenship/security-clearance requirements always flag. "US-based"/"work authorization" language only flags for postings that read as full-time EMPLOYEE roles — a contract/freelance/part-time posting is never flagged for this, since a contractor can legally work for a client anywhere while based elsewhere. |
 | **Dead posting** | Dropped entirely | "We don't currently have any open roles" — not a real job. |
 
 The role-type gate also has a **content-based backstop**: some
@@ -123,10 +131,29 @@ the job's full text is checked too — but only when the title doesn't
 already contain a clear engineering word, so a real ML Engineer posting
 that mentions "customer-facing" once in passing isn't penalized for it.
 
+### Work eligibility
+
+`config.json`'s optional `work_eligibility` section describes any real
+work-authorization constraints you have, which the full-time-employee
+and location gates above read from:
+```json
+"work_eligibility": {
+  "based_in": "Italy",
+  "full_time_employee_ok": false,
+  "notes": "Free text describing your real situation, e.g. a student visa that only permits freelance/contract work up to a certain number of hours/year."
+}
+```
+- `full_time_employee_ok: false` means permanent full-time EMPLOYEE
+  postings get the soft penalty + flag above; freelance/contract/
+  part-time postings are never penalized for employment type.
+- Missing this section entirely (or leaving `full_time_employee_ok:
+  true`) makes both of these gates a complete no-op — the default is "no
+  restriction," so this never affects anyone who hasn't filled it in.
+
 All of these constants (`ROLE_TYPE_MISMATCH_PATTERN`,
-`SENIORITY_PENALTY_POINTS`, `LOCATION_RESTRICTION_PATTERN`,
-`MAX_JOB_AGE_DAYS`, `KEYWORD_PATTERNS`) are near the top of
-`src/match_llm.py`/`src/sources.py` and are meant to be tuned — they're
+`SENIORITY_PENALTY_POINTS`, `EMPLOYEE_ONLY_RESTRICTION_PATTERN`,
+`FULL_TIME_EMPLOYEE_PENALTY_POINTS`, `KEYWORD_PATTERNS`) are near the top
+of `src/match_llm.py`/`src/sources.py` and are meant to be tuned — they're
 the result of iterating against real, messy job-board data, not a fixed
 design.
 
