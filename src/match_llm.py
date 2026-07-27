@@ -196,21 +196,48 @@ SENIORITY_MAX_YEARS = 4
 SENIORITY_PENALTY_POINTS = 12
 
 # Gate 3: LOCATION/ELIGIBILITY (INFORMATIONAL FLAG ONLY, no score
-# effect). The candidate is in Italy on a student residence permit - a
-# job that requires being based in / authorized to work in a specific
-# country, an on-site presence, or a security clearance may not be
-# something they're eligible for, but that's the user's call to make,
-# not the tool's to hide. This is a heuristic text search, not true NLP -
-# it can't detect negation (e.g. "no work authorization required" would
-# still match "work authorization"), so treat the flag as a prompt to go
-# check, not gospel.
-LOCATION_RESTRICTION_PATTERN = re.compile(
-    r"\b(us[\s-]based|u\.s\.[\s-]based|united states[\s-]based"
+# effect - that's the user's call to make, not the tool's to hide). Split
+# into two patterns because they mean different things for a freelancer
+# working as a CONTRACTOR from Italy:
+# - ON-SITE/citizenship/clearance requirements ALWAYS apply, regardless
+#   of contract vs. employee - physical presence or citizenship isn't
+#   something a contract status changes.
+# - "US-based"/"work authorization" language is normally about W2
+#   EMPLOYMENT eligibility - a contractor can legally do freelance/
+#   contract/part-time work for a US (or any) client while physically
+#   based in Italy (see config.json's "work_eligibility"), so this ONLY
+#   gets flagged for postings that read as a full-time EMPLOYEE role
+#   (see is_full_time_employee_role() below) - see location_flag().
+# This is a heuristic text search, not true NLP - it can't detect
+# negation (e.g. "no work authorization required" would still match),
+# so treat the flag as a prompt to go check, not gospel.
+ON_SITE_RESTRICTION_PATTERN = re.compile(
+    r"\b(on-?site|in-office|in office"
     r"|must be (located|based|residing) in|must reside in"
-    r"|work authorization|authorized to work in|security clearance"
-    r"|citizens? only|on-?site|in-office|in office|relocat(e|ion) to)\b",
+    r"|citizens? only|security clearance|relocat(e|ion) to)\b",
     re.IGNORECASE,
 )
+EMPLOYEE_ONLY_RESTRICTION_PATTERN = re.compile(
+    r"\b(us[\s-]based|u\.s\.[\s-]based|united states[\s-]based"
+    r"|work authorization|authorized to work in)\b",
+    re.IGNORECASE,
+)
+
+# Gate 5: JOB TYPE (SOFT penalty + flag, config-driven - see
+# WORK_ELIGIBILITY below). A posting explicitly offering contract/
+# freelance/part-time work always wins over an ambiguous or absent
+# employment-type mention; anything else that mentions "full-time" is
+# treated as a permanent EMPLOYEE role. Only penalized/flagged if
+# config.json's work_eligibility.full_time_employee_ok is false - the
+# default (missing section) is True, so this never affects anyone who
+# hasn't filled in that section.
+CONTRACT_TYPE_PATTERN = re.compile(
+    r"\b(contract|contractor|freelance|part[\s-]?time|1099"
+    r"|independent contractor|c2c|corp-to-corp)\b",
+    re.IGNORECASE,
+)
+FULL_TIME_PATTERN = re.compile(r"\bfull[\s-]?time\b", re.IGNORECASE)
+FULL_TIME_EMPLOYEE_PENALTY_POINTS = 10
 
 # Gate 4: DEAD POSTINGS. A posting that says there's no open role right
 # now isn't a job at all - see sources.py's is_dead_posting() for where
@@ -278,15 +305,67 @@ def seniority_mismatch(title, job_text):
 
 def location_flag(job_text):
     """
-    Gate 3 - see LOCATION_RESTRICTION_PATTERN above. Returns an
-    informational flag string naming the matched phrase (e.g. "US-based"),
-    or None if nothing matched. NEVER affects the score - see
-    apply_score_adjustments().
+    Gate 3 - see ON_SITE_RESTRICTION_PATTERN/EMPLOYEE_ONLY_RESTRICTION_PATTERN
+    above. Returns an informational flag string, or None if nothing
+    applies. NEVER affects the score - see apply_score_adjustments().
     """
-    match = LOCATION_RESTRICTION_PATTERN.search(job_text)
-    if not match:
+    on_site_match = ON_SITE_RESTRICTION_PATTERN.search(job_text)
+    if on_site_match:
+        return (
+            f'Possible location restriction: "{on_site_match.group(0)}" '
+            "- requires physical presence/citizenship, check if you qualify."
+        )
+
+    # "US-based"/"work authorization" language is about EMPLOYEE
+    # eligibility - irrelevant to a contractor, so skip it entirely for
+    # postings that read as contract/freelance/part-time work.
+    if is_contract_type_role(job_text) and not is_full_time_employee_role(job_text):
         return None
-    return f'Possible location/eligibility restriction: "{match.group(0)}" - check if you qualify.'
+
+    employee_match = EMPLOYEE_ONLY_RESTRICTION_PATTERN.search(job_text)
+    if not employee_match:
+        return None
+    return (
+        f'Possible work-authorization restriction (full-time employee role): '
+        f'"{employee_match.group(0)}" - check if you qualify.'
+    )
+
+
+def is_contract_type_role(job_text):
+    """True if `job_text` explicitly reads as contract/freelance/part-time work."""
+    return bool(CONTRACT_TYPE_PATTERN.search(job_text))
+
+
+def is_full_time_employee_role(job_text):
+    """
+    Gate 5 - True if `job_text` reads as a permanent full-time EMPLOYEE
+    role. An explicit contract/freelance/part-time signal always wins
+    over an ambiguous "full-time" mention (e.g. "full-time contract" is
+    still a contract, not employment) - only when NO contract signal is
+    present does a "full-time" mention count as employment.
+    """
+    if is_contract_type_role(job_text):
+        return False
+    return bool(FULL_TIME_PATTERN.search(job_text))
+
+
+def full_time_employee_flag(job_text):
+    """
+    Gate 5 - informational flag companion to the score penalty in
+    apply_score_adjustments(). Returns None unless BOTH
+    work_eligibility.full_time_employee_ok is false (see WORK_ELIGIBILITY)
+    AND this specific posting reads as a full-time employee role - this
+    is a personal constraint from config.json, not a universal rule, so
+    it's silent by default for anyone who hasn't set it.
+    """
+    if WORK_ELIGIBILITY["full_time_employee_ok"]:
+        return None
+    if not is_full_time_employee_role(job_text):
+        return None
+    return (
+        "Full-time employee role - check eligibility "
+        "(currently limited to freelance/contract/part-time work)."
+    )
 
 
 def is_dead_posting(job_text):
@@ -296,16 +375,22 @@ def is_dead_posting(job_text):
 
 def apply_score_adjustments(score, domain_fit, title, job_text):
     """
-    Apply the role-type HARD cap and the seniority SOFT penalty to
-    `score` and return the result (see the gate comments above for why
-    they're treated differently). Location is intentionally NOT applied
-    here at all - see location_flag(), used separately to add an
-    informational flag without touching the score.
+    Apply the role-type HARD cap, then the seniority and full-time-
+    employee SOFT penalties (both can stack), and return the result (see
+    the gate comments above for why they're treated differently).
+    Location is intentionally NOT applied here at all - see
+    location_flag(), used separately to add an informational flag
+    without touching the score.
     """
     if not domain_fit or role_type_mismatch(title) or content_suggests_non_engineering_role(title, job_text):
         return min(score, DOMAIN_MISMATCH_SCORE_CAP)
+
     if seniority_mismatch(title, job_text):
-        return max(0, score - SENIORITY_PENALTY_POINTS)
+        score = max(0, score - SENIORITY_PENALTY_POINTS)
+
+    if not WORK_ELIGIBILITY["full_time_employee_ok"] and is_full_time_employee_role(job_text):
+        score = max(0, score - FULL_TIME_EMPLOYEE_PENALTY_POINTS)
+
     return score
 
 # This is the standard local address Ollama listens on. "11434" is just
@@ -437,6 +522,28 @@ def resolve_llm_provider(config):
     return provider, model
 
 
+# Defaults to "no restriction" (full_time_employee_ok=True) so anyone
+# whose config.json doesn't have a "work_eligibility" section at all
+# (older config files, or a user with no special work-authorization
+# constraints) sees the job-type gate behave as a complete no-op - this
+# is a personal constraint, not a universal rule.
+DEFAULT_WORK_ELIGIBILITY = {
+    "based_in": "",
+    "full_time_employee_ok": True,
+    "notes": "",
+}
+
+
+def load_work_eligibility_config(config):
+    """
+    Read the OPTIONAL "work_eligibility" section from the parsed config
+    dict (see load_config()) and merge it over DEFAULT_WORK_ELIGIBILITY,
+    so a config.json that only sets SOME of these keys still gets sane
+    defaults for the rest.
+    """
+    return {**DEFAULT_WORK_ELIGIBILITY, **config.get("work_eligibility", {})}
+
+
 _config = load_config()
 
 # My profile and my concrete projects grouped by domain, as plain text -
@@ -452,6 +559,12 @@ MY_PROFILE, MY_PROJECTS_BY_DOMAIN = load_profile_config(_config)
 # above) - MODEL_NAME is used both by ask_llm()'s dispatch and in terminal
 # messages ("Scoring each with {MODEL_NAME}...") regardless of provider.
 LLM_PROVIDER, MODEL_NAME = resolve_llm_provider(_config)
+
+# Your real-world work eligibility (see load_work_eligibility_config()
+# above) - used by the job-type gate (Gate 5: is_full_time_employee_role(),
+# full_time_employee_flag(), apply_score_adjustments()) to decide whether
+# full-time employee postings should be penalized/flagged at all.
+WORK_ELIGIBILITY = load_work_eligibility_config(_config)
 
 # Scoring rules for the model to follow. This has gone through several
 # rounds of fixes:
@@ -1965,7 +2078,7 @@ def cli_fetch_jobs():
         print(
             f"{source_name}: {source_stats['found']} found, "
             f"{source_stats['keyword_matched']} matched keywords, "
-            f"{source_stats['fresh']} also fresh (<= {sources.MAX_JOB_AGE_DAYS}d old), "
+            f"{source_stats['active']} still active (not expired), "
             f"{source_stats['duplicates']} already in {JOBS_JSON_FILE}, "
             f"{source_stats['added']} newly added"
         )
@@ -1979,9 +2092,10 @@ def cli_run_daily():
     Handle `python match_llm.py --daily`: the full end-to-end daily
     workflow.
         1. Fetch new jobs from every automatic source (cli_fetch_jobs()).
-           sources.py already restricts what it returns to postings from
-           the last sources.MAX_JOB_AGE_DAYS days (see
-           sources.freshness_status()).
+           These are normal job boards, not Upwork - sources.py keeps
+           any job still actively listed (regardless of how long ago it
+           was posted) and only drops one a source explicitly marks as
+           expired (see sources.posting_status()).
         2. Score any unscored jobs, reusing results.json for everything
            else (run_scoring_and_report(use_cache=True) only ever calls
            Ollama for jobs missing from the cache - once the very first
@@ -2219,17 +2333,23 @@ def run_scoring_and_report(use_cache, draft_proposals=True):
         if computed_score is not None:
             score = computed_score
 
-        # Code-level gates - role type (hard cap), seniority (soft
-        # penalty) - see apply_score_adjustments() above for why these
-        # are enforced in code rather than trusted to the model's own
-        # judgment. Location is a flag only, added to `flags` below -
-        # never affects the score.
+        # Code-level gates - role type (hard cap), seniority + full-time-
+        # employee (soft penalties) - see apply_score_adjustments() above
+        # for why these are enforced in code rather than trusted to the
+        # model's own judgment. Location and full-time-employee status
+        # are flags only, added to `flags` below - the employee flag
+        # accompanies a real score penalty (applied above), location
+        # never affects the score at all.
         domain_fit = parse_domain_fit(raw_reply)
         score = apply_score_adjustments(score, domain_fit, title, job_text)
 
         location_warning = location_flag(job_text)
         if location_warning:
             flags = flags + [location_warning]
+
+        employee_warning = full_time_employee_flag(job_text)
+        if employee_warning:
+            flags = flags + [employee_warning]
 
         # Only draft a proposal for high-scoring jobs - it's not worth
         # spending the model's (or the client's) time on a poor fit. And
