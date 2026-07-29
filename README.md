@@ -2,11 +2,12 @@
 
 A personal job-hunting agent for ML/AI/data-science roles: it **finds**
 jobs automatically from seven public job boards, **scores** every one
-against your real resume using a **local LLM** (nothing leaves your
-machine), applies a set of hard-coded fit gates tuned from real testing
-(role type, seniority, job type, location/eligibility), and hands you a
-clean, ranked HTML report with direct links — every morning, on a
-schedule, with zero manual browsing.
+against your real resume using an **LLM** (a free local model via Ollama,
+or a cloud model like Claude Haiku for better accuracy), applies a set of
+hard-coded fit gates tuned from real testing (role type, seniority, job
+type, location/eligibility), and hands you a clean, ranked HTML report
+with direct links and a skill-gap analysis — every day, on a schedule,
+with zero manual browsing.
 
 It also supports a second, fully manual path: a Chrome extension that
 saves individual Upwork postings you're already looking at, scored the
@@ -42,9 +43,15 @@ missing feature.
    Clear-all button, so it behaves like a real to-do list rather than a
    report that resets every time — see [The persistent job
    list](#the-persistent-job-list) below.
-6. **Runs unattended on a schedule** (Windows Task Scheduler, 3x/day out
-   of the box) so the report is just waiting for you.
-7. **(Optional, manual)** A Chrome extension + local server let you save
+6. **Runs unattended on a schedule** (Windows Task Scheduler, once daily
+   at 1pm out of the box) so the report is just waiting for you.
+7. **Flags skill gaps on near-miss jobs.** For every job scoring above 60,
+   the report shows exactly what's costing you a clean match, split into
+   quick-to-learn gaps (a specific tool/library) vs. large gaps (years of
+   experience, a different domain), plus a "Focus on these skills" summary
+   ranking the most-requested gaps across your whole list — see [Skill-gap
+   analysis](#skill-gap-analysis) below.
+8. **(Optional, manual)** A Chrome extension + local server let you save
    individual Upwork postings you're already viewing, scored the same
    way, with a drafted first-pass proposal for strong matches.
 
@@ -120,7 +127,7 @@ these deterministic checks run in code:
 |---|---|---|
 | **Role type** | Hard cap (15) | Titles/content indicating management, sales, recruiting, accounting, marketing, "subject matter expert," solutions/sales/value engineer, consulting, customer success, etc. — genuinely not hands-on ML/AI engineering, regardless of how much AI vocabulary surrounds it. |
 | **Seniority** | Soft penalty (−12) | "Senior"/"Lead" titles, or a stated requirement of 5+ years — downweighted, not hidden, since this is a free board with no per-application cost and a strong-fitting senior role is still worth seeing. |
-| **Full-time employee** | Soft penalty (−10) + flag, config-driven | Postings that read as permanent full-time EMPLOYEE roles (as opposed to contract/freelance/part-time) — only active if `config.json`'s `work_eligibility.full_time_employee_ok` is `false`; a no-op for anyone who hasn't set that. See [Work eligibility](#work-eligibility) below. |
+| **Full-time employee** | Excluded entirely, config-driven | Postings that read as permanent full-time EMPLOYEE roles (as opposed to contract/freelance/part-time) are dropped from the job list completely — not flagged, not scored lower — only active if `config.json`'s `work_eligibility.full_time_employee_ok` is `false`; a no-op for anyone who hasn't set that. See [Work eligibility](#work-eligibility) below. |
 | **Location/eligibility** | Flag only, no score effect | On-site/citizenship/security-clearance requirements always flag. "US-based"/"work authorization" language only flags for postings that read as full-time EMPLOYEE roles — a contract/freelance/part-time posting is never flagged for this, since a contractor can legally work for a client anywhere while based elsewhere. |
 | **Dead posting** | Dropped entirely | "We don't currently have any open roles" — not a real job. |
 
@@ -144,56 +151,59 @@ and location gates above read from:
 }
 ```
 - `full_time_employee_ok: false` means permanent full-time EMPLOYEE
-  postings get the soft penalty + flag above; freelance/contract/
-  part-time postings are never penalized for employment type.
+  postings are excluded entirely from the job list; freelance/contract/
+  part-time postings are never affected by this.
 - Missing this section entirely (or leaving `full_time_employee_ok:
   true`) makes both of these gates a complete no-op — the default is "no
   restriction," so this never affects anyone who hasn't filled it in.
 
 All of these constants (`ROLE_TYPE_MISMATCH_PATTERN`,
 `SENIORITY_PENALTY_POINTS`, `EMPLOYEE_ONLY_RESTRICTION_PATTERN`,
-`FULL_TIME_EMPLOYEE_PENALTY_POINTS`, `KEYWORD_PATTERNS`) are near the top
-of `src/match_llm.py`/`src/sources.py` and are meant to be tuned — they're
-the result of iterating against real, messy job-board data, not a fixed
-design.
+`KEYWORD_PATTERNS`) are near the top of `src/match_llm.py`/`src/sources.py`
+and are meant to be tuned — they're the result of iterating against real,
+messy job-board data, not a fixed design.
 
 ## LLM provider: free local, or paid cloud for more accuracy
 
-By default, scoring runs entirely on your own machine via
-**[Ollama](https://ollama.com)** — free, private (nothing leaves your
-computer), and the local 8B model is what all the gates above were built
-to compensate for. You can optionally point scoring at a cloud LLM
-(**Anthropic Claude** or **OpenAI GPT**) instead, which reasons about job
-fit noticeably better than a local 8B model out of the box — at the cost
-of a small per-run API charge and your job descriptions/profile being
-sent to that provider.
+Scoring can run on your own machine via **[Ollama](https://ollama.com)**
+— free, private (nothing leaves your computer) — or on a cloud LLM
+(**Anthropic Claude** or **OpenAI GPT**), which reasons about job fit
+noticeably better than a local 8B model out of the box, at the cost of a
+small per-run API charge and your job descriptions/profile being sent to
+that provider.
 
 Set it in `config.json`:
 ```json
 {
-  "llm_provider": "ollama",
-  "llm_model": "llama3.1:8b"
+  "llm_provider": "anthropic",
+  "llm_model": "claude-haiku-4-5-20251001"
 }
 ```
-To switch to a cloud provider, change `llm_provider` to `"anthropic"` or
-`"openai"`, set `llm_model` to a model of theirs (e.g.
-`"claude-sonnet-4-5"` or `"gpt-4o"`), and set the matching API key as an
-**environment variable** — never in `config.json` or anywhere else in
-the repo:
+(The public `config.example.json` template defaults to
+`"ollama"`/`"llama3.1:8b"` instead, so anyone cloning the repo starts on
+the free, zero-setup path.)
+
+To use a cloud provider, set the matching API key as an **environment
+variable** — never in `config.json` or anywhere else in the repo:
 ```
 # Windows (PowerShell)
 $env:ANTHROPIC_API_KEY = "sk-ant-..."
 # macOS/Linux
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
-(`OPENAI_API_KEY` for `"openai"`.) If `llm_provider` is set to a cloud
-provider but the matching environment variable isn't set when you run
-the tool, it prints a clear warning and automatically falls back to the
-free local Ollama model — a missing key never crashes a run.
+(`OPENAI_API_KEY` for `"openai"`.) If a cloud API call fails for any
+reason (rate limit, network blip, outage), that single request falls
+back to a local Ollama model (`llama3.2`) instead of crashing the whole
+run — every cached result records exactly which model actually answered
+it (`"model": "anthropic:claude-haiku-4-5-20251001"` vs. e.g.
+`"ollama:llama3.2 (fallback)"`), so a run is never silently scored by a
+mix of models without you knowing.
 
 Scoring logic, prompts, gates, and output are byte-for-byte identical
 regardless of provider — swapping providers only changes which API
-answers the same prompt (see `ask_llm()` in `src/match_llm.py`).
+answers the same prompt (see `ask_llm()` in `src/match_llm.py`). Any
+cache entry from before this "model" field existed is automatically
+treated as legacy and re-scored on the next run.
 
 ## Setup
 
@@ -290,6 +300,30 @@ them yourself:
 requirement as `report.html`'s delete button) — see
 [Setup](#optional-manual-upwork-extension).
 
+## Skill-gap analysis
+
+Every job scoring above `SKILL_GAP_SCORE_THRESHOLD` (60 by default) is a
+realistic near-miss — a role you could plausibly have gotten, if not for
+some specific gap. The same scoring prompt/response already extracts a
+`GAPS:` list (requirements your profile lacks); this feature just adds one
+more thing to that list for free, no extra LLM calls: whether each gap is
+`(quick to learn)` — a specific tool/library/framework learnable in
+days/weeks (e.g. Docker, a specific API, a JS framework) — or a
+`(large gap)` — years of experience or a genuinely different domain.
+
+- **Per-job.** Each above-60 card shows a line like "Strong match, but
+  missing: **quick to learn:** Docker · **large gap:** 5+ years production
+  experience" — only real gaps, nothing you already have.
+- **Aggregate summary.** The top of `daily_report.html` has a "🎯 Focus on
+  these skills" section, ranking every gap across your whole above-60 list
+  by how often it shows up — quick wins first, since a gap that's both
+  frequent and fast to learn unlocks the most near-miss jobs for the least
+  effort (see `compute_skill_gap_summary()` in `src/match_llm.py`).
+- Only computed for roles you're actually eligible for — full-time
+  postings excluded by the [work eligibility](#work-eligibility) gate never
+  get analyzed, since there's no point spending analysis on a job you
+  can't take anyway.
+
 ## Running on a schedule (Windows Task Scheduler)
 
 `run_daily.bat` wraps `python src/match_llm.py --daily` for unattended runs:
@@ -299,11 +333,9 @@ never crash the run over a console codepage mismatch, checks whether
 Ollama is responding and starts it if not, and appends everything with
 timestamps to `daily_run_log.txt`.
 
-To schedule it 3x/day (11am, 4pm, 10pm):
+To schedule it once daily at 1pm:
 ```
-schtasks /create /tn "MLJobAgent_Daily_11AM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 11:00 /f
-schtasks /create /tn "MLJobAgent_Daily_4PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 16:00 /f
-schtasks /create /tn "MLJobAgent_Daily_10PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 22:00 /f
+schtasks /create /tn "MLJobAgent_Daily_1PM" /tr "D:\path\to\repo\run_daily.bat" /sc daily /st 13:00 /f
 ```
 Useful follow-ups: `schtasks /query /tn "..." /fo LIST /v` (check status),
 `schtasks /run /tn "..."` (trigger immediately, for testing),
