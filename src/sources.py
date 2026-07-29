@@ -85,26 +85,198 @@ RETRY_BACKOFF_SECONDS = 2
 KEYWORD_PATTERNS = [
     r"machine learning",
     r"\bML\b",
+    r"\bML engineer\b",
+    r"\bML developer\b",
     r"deep learning",
     r"\bAI\b",
     r"\bLLM\b",
     r"large language model",
     r"\bNLP\b",
     r"natural language processing",
+    r"\btransformers?\b",
     r"\bRAG\b",
     r"retrieval[- ]augmented generation",
     r"computer vision",
+    r"\bCNN\b",
+    r"image classification",
     r"PyTorch",
     r"TensorFlow",
+    r"\bKeras\b",
     r"fine[- ]?tuning",
+    r"\bLoRA\b",
+    r"\bPEFT\b",
     r"prompt engineering",
     r"hugging face",
+    r"scikit-learn",
+    r"\bOpenCV\b",
+    r"\bPython\b",
+    r"\bFastAPI\b",
+    r"\bChromaDB\b",
     r"data scientist",
     r"model training",
     r"embeddings?",
     r"vector database",
 ]
 RELEVANT_KEYWORDS_PATTERN = re.compile("|".join(KEYWORD_PATTERNS), re.IGNORECASE)
+
+# STEP 4 (negative-keyword gate) - a job whose TITLE contains one of these
+# is almost certainly the wrong field entirely (surveying/geospatial work
+# that happens to use "AI" as a buzzword) or a non-technical business
+# role (recruiting/sales/accounting/support), even at an otherwise
+# ML/AI-focused company. Checked title-only, same reasoning as
+# is_relevant()'s title check and match_llm.py's ENGINEERING_TITLE_PATTERN
+# backstop: a title clearly signaling a real engineering/research role
+# (see CLEAR_ENGINEERING_TITLE_PATTERN below) always wins over an
+# incidental domain word - e.g. "Founding AI Engineer, Tax Startup" stays
+# in (it's a genuine ML engineering role that happens to work in the tax
+# domain), but "Tax Accountant" or "Payroll Specialist" does not.
+NEGATIVE_DOMAIN_PATTERNS = [
+    r"\bgeodesy\b",
+    r"\bGIS\b",
+    r"\bphotogrammetry\b",
+    r"remote sensing",
+    r"\bsurveying\b",
+    r"\blidar\b",
+    r"drone pilot(ing)?",
+    r"\bpayroll\b",
+    r"\bHR\b",
+    r"human resources",
+    r"\brecruiting\b",
+    r"\brecruiter\b",
+    r"\bsales\b",
+    r"\bmarketing\b",
+    r"\baccounting\b",
+    r"\baccountant\b",
+    r"\btax\b",
+    r"customer support",
+    r"customer service",
+]
+NEGATIVE_DOMAIN_PATTERN = re.compile("|".join(NEGATIVE_DOMAIN_PATTERNS), re.IGNORECASE)
+
+CLEAR_ENGINEERING_TITLE_PATTERN = re.compile(
+    r"\b(engineer(ing)?|scientist|developer|research(er)?)\b", re.IGNORECASE
+)
+
+
+def is_wrong_domain(text):
+    """
+    STEP 4 - True if `text`'s title reads as the wrong field (GIS/
+    geospatial/surveying work) or a non-technical business role
+    (recruiting/sales/marketing/accounting/support), even though it may
+    mention "AI" elsewhere. Title-only, with a clear-engineering-title
+    override (see NEGATIVE_DOMAIN_PATTERN's comment above) so a genuine
+    ML/AI engineering role isn't dropped just because its product domain
+    happens to touch one of these words (e.g. an AI tax-automation
+    startup's "Founding AI Engineer" posting).
+    """
+    title = text.split("\n", 1)[0]
+    if CLEAR_ENGINEERING_TITLE_PATTERN.search(title):
+        return False
+    return bool(NEGATIVE_DOMAIN_PATTERN.search(title))
+
+
+# STEP 2 (remote-only gate) - keep a job only if it's genuinely remote;
+# freelance/contract work counts too, since that's remote-by-nature work
+# for a client anywhere. See classify_remote_status() below for how these
+# combine with each source's own remote signal (or lack of one).
+REMOTE_POSITIVE_PATTERN = re.compile(
+    r"\bfully remote\b|\bremote[\s-]?first\b|\b100%\s*remote\b"
+    r"|\bwork from anywhere\b|\bremote\s*[-–]?\s*(eu|europe|usa|us|uk|global|worldwide)\b"
+    r"|\bworldwide\b|\banywhere\b|\bfreelance\b|\bcontract\b|\bremote\b",
+    re.IGNORECASE,
+)
+REMOTE_NEGATIVE_PATTERN = re.compile(
+    r"\bhybrid\b|\bon[\s-]?site\b|\bonsite\b|\bin[\s-]?office\b"
+    r"|\b\d+\s*days?\s*(a|per)\s*week\s*(in|at)\s*(the\s*)?office\b",
+    re.IGNORECASE,
+)
+
+# Terms in a location field that mean "no specific place, no signal
+# either way" - not enough alone to call something remote (that's what
+# REMOTE_POSITIVE_PATTERN is for) but not a real place name either.
+_GENERIC_LOCATION_TERMS = {"", "remote", "worldwide", "anywhere", "global", "n/a", "unknown"}
+
+# RemoteOK, Remotive, Himalayas, Jobicy, and WeWorkRemotely are all
+# remote-jobs-ONLY boards by definition - every listing on them is remote
+# work, even though their location/region fields describe geographic
+# ELIGIBILITY ("USA Only", "Worldwide") rather than remote-vs-onsite
+# status. Arbeitnow and The Muse are general job boards that list both
+# remote and on-site/hybrid roles side by side, so they need real
+# filtering - see classify_remote_status()'s callers below.
+REMOTE_FIRST_SOURCES = {"remoteok", "remotive", "himalayas", "jobicy", "weworkremotely"}
+
+
+def classify_remote_status(location_or_type, description, remote_hint=None, assume_remote_board=False):
+    """
+    STEP 2 - classify a posting as "remote", "excluded" (on-site/hybrid),
+    or "unconfirmed" (no reliable signal either way - kept, but tagged
+    for a manual look, per the user's explicit instruction not to drop
+    genuinely ambiguous postings).
+
+    `remote_hint` is a per-JOB, source-provided boolean when the raw API
+    exposes one (currently only Arbeitnow's "remote" field), and
+    `assume_remote_board` is a per-SOURCE flag for boards that are
+    remote-only by definition (see REMOTE_FIRST_SOURCES). Either one is
+    an AUTHORITATIVE "yes, this is remote" signal - trusted without
+    needing the word "remote" to literally appear anywhere. Only the
+    LOCATION field itself (not the full description) can override that
+    trust, since a long description commonly contains generic company-
+    benefits boilerplate ("our hybrid work culture...") that has nothing
+    to do with whether THIS specific listing is remote - checking the
+    whole description against an authoritatively-remote listing produced
+    false exclusions of postings explicitly titled e.g. "(Remote - U.S.)"
+    whose body happened to mention "hybrid" once, in a benefits
+    paragraph.
+
+    Falls back to text matching for everything else (The Muse, and
+    Arbeitnow when its "remote" field is missing/None): a positive phrase
+    ("fully remote", "remote EU", "freelance", "contract", ...) keeps it;
+    a negative phrase ("hybrid", "on-site", "3 days a week in the
+    office") anywhere in the posting excludes it; a specific place name
+    with neither reads as an on-site posting and is excluded; a blank/
+    generic location with neither is genuinely unknown and is kept as
+    "unconfirmed".
+    """
+    if remote_hint is False:
+        return "excluded"
+
+    if remote_hint is True or assume_remote_board:
+        if REMOTE_NEGATIVE_PATTERN.search(location_or_type):
+            return "excluded"
+        return "remote"
+
+    combined = f"{location_or_type}\n{description}"
+
+    if REMOTE_NEGATIVE_PATTERN.search(combined):
+        return "excluded"
+    if REMOTE_POSITIVE_PATTERN.search(combined):
+        return "remote"
+
+    if location_or_type.strip().lower() in _GENERIC_LOCATION_TERMS:
+        return "unconfirmed"
+    return "excluded"  # a specific place name, no remote mention
+
+
+def _apply_remote_gate(location_or_type, description, remote_hint=None, assume_remote_board=False):
+    """
+    Shared by every fetch_*() below: runs classify_remote_status() and
+    returns (keep, location_or_type) - `location_or_type` comes back
+    annotated with "[remote-unconfirmed]" when the status is ambiguous,
+    so the tag rides along in the job's saved "text" (the simplest way to
+    surface it without this file needing to touch match_llm.py's report
+    rendering at all - see the module docstring on additive fields).
+    `keep` is False only for "excluded" - both "remote" and "unconfirmed"
+    are kept, per the STEP 2 instruction to never drop a genuinely
+    ambiguous posting.
+    """
+    remote_status = classify_remote_status(
+        location_or_type, description, remote_hint=remote_hint, assume_remote_board=assume_remote_board
+    )
+    if remote_status == "excluded":
+        return False, location_or_type
+    if remote_status == "unconfirmed":
+        location_or_type = f"{location_or_type} [remote-unconfirmed]".strip()
+    return True, location_or_type
 
 _TAG_PATTERN = re.compile(r"<[^>]+>")
 
@@ -346,7 +518,7 @@ def build_normalized_job(
 
 
 def _empty_funnel():
-    return {"found": 0, "keyword_matched": 0}
+    return {"found": 0, "keyword_matched": 0, "remote_filtered": 0, "domain_filtered": 0}
 
 
 def fetch_remoteok():
@@ -377,6 +549,8 @@ def fetch_remoteok():
     jobs = []
     found = 0
     keyword_matched = 0
+    remote_filtered = 0
+    domain_filtered = 0
 
     for raw_job in raw_jobs:
         if "position" not in raw_job or "company" not in raw_job:
@@ -387,16 +561,29 @@ def fetch_remoteok():
         location = raw_job.get("location") or "Remote"
         job_type = ", ".join(raw_job.get("tags", []) or [])
         location_or_type = f"{location}" + (f" | {job_type}" if job_type else "")
+        description = strip_html(raw_job.get("description", ""))
+
+        # RemoteOK is a remote-jobs-only board - see REMOTE_FIRST_SOURCES.
+        remote_ok, location_or_type = _apply_remote_gate(
+            location_or_type, description, assume_remote_board=True
+        )
+        if not remote_ok:
+            remote_filtered += 1
+            continue
 
         job = build_normalized_job(
             title=raw_job.get("position", ""),
             company=raw_job.get("company", ""),
             location_or_type=location_or_type,
-            description=strip_html(raw_job.get("description", "")),
+            description=description,
             url=raw_job.get("url") or raw_job.get("apply_url") or "",
             source="remoteok",
             date_posted=raw_job.get("date"),
         )
+
+        if is_wrong_domain(job["text"]):
+            domain_filtered += 1
+            continue
 
         if not is_relevant(job["text"]) or is_dead_posting(job["text"]):
             continue
@@ -405,7 +592,12 @@ def fetch_remoteok():
         if job["freshness"] != "expired":
             jobs.append(job)
 
-    return jobs, {"found": found, "keyword_matched": keyword_matched}
+    return jobs, {
+        "found": found,
+        "keyword_matched": keyword_matched,
+        "remote_filtered": remote_filtered,
+        "domain_filtered": domain_filtered,
+    }
 
 
 def fetch_remotive():
@@ -426,21 +618,36 @@ def fetch_remotive():
     jobs = []
     found = len(raw_jobs)
     keyword_matched = 0
+    remote_filtered = 0
+    domain_filtered = 0
 
     for raw_job in raw_jobs:
         location_or_type = f"{raw_job.get('candidate_required_location', 'Remote')} | {raw_job.get('job_type', '')}".strip(
             " |"
         )
+        description = strip_html(raw_job.get("description", ""))
+
+        # Remotive is a remote-jobs-only board - see REMOTE_FIRST_SOURCES.
+        remote_ok, location_or_type = _apply_remote_gate(
+            location_or_type, description, assume_remote_board=True
+        )
+        if not remote_ok:
+            remote_filtered += 1
+            continue
 
         job = build_normalized_job(
             title=raw_job.get("title", ""),
             company=raw_job.get("company_name", ""),
             location_or_type=location_or_type,
-            description=strip_html(raw_job.get("description", "")),
+            description=description,
             url=raw_job.get("url", ""),
             source="remotive",
             date_posted=raw_job.get("publication_date"),
         )
+
+        if is_wrong_domain(job["text"]):
+            domain_filtered += 1
+            continue
 
         if not is_relevant(job["text"]) or is_dead_posting(job["text"]):
             continue
@@ -449,7 +656,12 @@ def fetch_remotive():
         if job["freshness"] != "expired":
             jobs.append(job)
 
-    return jobs, {"found": found, "keyword_matched": keyword_matched}
+    return jobs, {
+        "found": found,
+        "keyword_matched": keyword_matched,
+        "remote_filtered": remote_filtered,
+        "domain_filtered": domain_filtered,
+    }
 
 
 def fetch_arbeitnow():
@@ -475,22 +687,49 @@ def fetch_arbeitnow():
     jobs = []
     found = len(raw_jobs)
     keyword_matched = 0
+    remote_filtered = 0
+    domain_filtered = 0
 
     for raw_job in raw_jobs:
-        location = raw_job.get("location") or ("Remote" if raw_job.get("remote") else "")
+        remote_flag = raw_job.get("remote")
+        location = raw_job.get("location") or ""
+        # Arbeitnow can set BOTH "location" (a real city, e.g. "Berlin")
+        # AND "remote": true at the same time (a remote role anchored to
+        # a city/country for tax/timezone reasons) - append rather than
+        # overwrite, so the remote signal survives into the saved text
+        # even when a specific place name is also present. Previously
+        # this used `location or ("Remote" if remote else "")`, which
+        # silently DROPPED the remote flag whenever a location string was
+        # present - the likely cause of on-site German postings leaking
+        # into the list despite Arbeitnow's API saying remote=true/false.
+        if remote_flag:
+            location = f"{location} (Remote)".strip() if location else "Remote"
         job_type = ", ".join(raw_job.get("job_types", []) or [])
         location_or_type = f"{location}" + (f" | {job_type}" if job_type else "")
+        description = strip_html(raw_job.get("description", ""))
         date_posted = _epoch_to_iso(raw_job.get("created_at"))
+
+        # Arbeitnow is a general German/EU board mixing remote AND
+        # on-site/hybrid roles - its explicit "remote" boolean is the
+        # authoritative signal (remote_hint), not a text guess.
+        remote_ok, location_or_type = _apply_remote_gate(location_or_type, description, remote_hint=remote_flag)
+        if not remote_ok:
+            remote_filtered += 1
+            continue
 
         job = build_normalized_job(
             title=raw_job.get("title", ""),
             company=raw_job.get("company_name", ""),
             location_or_type=location_or_type,
-            description=strip_html(raw_job.get("description", "")),
+            description=description,
             url=raw_job.get("url", ""),
             source="arbeitnow",
             date_posted=date_posted,
         )
+
+        if is_wrong_domain(job["text"]):
+            domain_filtered += 1
+            continue
 
         if not is_relevant(job["text"]) or is_dead_posting(job["text"]):
             continue
@@ -499,7 +738,12 @@ def fetch_arbeitnow():
         if job["freshness"] != "expired":
             jobs.append(job)
 
-    return jobs, {"found": found, "keyword_matched": keyword_matched}
+    return jobs, {
+        "found": found,
+        "keyword_matched": keyword_matched,
+        "remote_filtered": remote_filtered,
+        "domain_filtered": domain_filtered,
+    }
 
 
 def fetch_himalayas():
@@ -527,6 +771,8 @@ def fetch_himalayas():
     jobs = []
     found = len(raw_jobs)
     keyword_matched = 0
+    remote_filtered = 0
+    domain_filtered = 0
 
     for raw_job in raw_jobs:
         locations = raw_job.get("locationRestrictions") or []
@@ -534,18 +780,31 @@ def fetch_himalayas():
         employment_type = raw_job.get("employmentType")
         if employment_type:
             location_or_type += f" | {employment_type}"
+        description = strip_html(raw_job.get("description", ""))
         date_posted = _epoch_to_iso(raw_job.get("pubDate"))
+
+        # Himalayas is a remote-jobs-only board - see REMOTE_FIRST_SOURCES.
+        remote_ok, location_or_type = _apply_remote_gate(
+            location_or_type, description, assume_remote_board=True
+        )
+        if not remote_ok:
+            remote_filtered += 1
+            continue
 
         job = build_normalized_job(
             title=raw_job.get("title", ""),
             company=raw_job.get("companyName", ""),
             location_or_type=location_or_type,
-            description=strip_html(raw_job.get("description", "")),
+            description=description,
             url=raw_job.get("applicationLink") or raw_job.get("guid") or "",
             source="himalayas",
             date_posted=date_posted,
             expiry_timestamp=raw_job.get("expiryDate"),
         )
+
+        if is_wrong_domain(job["text"]):
+            domain_filtered += 1
+            continue
 
         if not is_relevant(job["text"]) or is_dead_posting(job["text"]):
             continue
@@ -554,7 +813,12 @@ def fetch_himalayas():
         if job["freshness"] != "expired":
             jobs.append(job)
 
-    return jobs, {"found": found, "keyword_matched": keyword_matched}
+    return jobs, {
+        "found": found,
+        "keyword_matched": keyword_matched,
+        "remote_filtered": remote_filtered,
+        "domain_filtered": domain_filtered,
+    }
 
 
 def fetch_jobicy():
@@ -577,20 +841,35 @@ def fetch_jobicy():
     jobs = []
     found = len(raw_jobs)
     keyword_matched = 0
+    remote_filtered = 0
+    domain_filtered = 0
 
     for raw_job in raw_jobs:
         job_type = ", ".join(raw_job.get("jobType", []) or [])
         location_or_type = f"{raw_job.get('jobGeo', 'Remote')}" + (f" | {job_type}" if job_type else "")
+        description = strip_html(raw_job.get("jobDescription", ""))
+
+        # Jobicy is a remote-jobs-only board - see REMOTE_FIRST_SOURCES.
+        remote_ok, location_or_type = _apply_remote_gate(
+            location_or_type, description, assume_remote_board=True
+        )
+        if not remote_ok:
+            remote_filtered += 1
+            continue
 
         job = build_normalized_job(
             title=raw_job.get("jobTitle", ""),
             company=raw_job.get("companyName", ""),
             location_or_type=location_or_type,
-            description=strip_html(raw_job.get("jobDescription", "")),
+            description=description,
             url=raw_job.get("url", ""),
             source="jobicy",
             date_posted=raw_job.get("pubDate"),
         )
+
+        if is_wrong_domain(job["text"]):
+            domain_filtered += 1
+            continue
 
         if not is_relevant(job["text"]) or is_dead_posting(job["text"]):
             continue
@@ -599,7 +878,12 @@ def fetch_jobicy():
         if job["freshness"] != "expired":
             jobs.append(job)
 
-    return jobs, {"found": found, "keyword_matched": keyword_matched}
+    return jobs, {
+        "found": found,
+        "keyword_matched": keyword_matched,
+        "remote_filtered": remote_filtered,
+        "domain_filtered": domain_filtered,
+    }
 
 
 # The Muse's public API requires a category, so we check a couple of
@@ -621,6 +905,8 @@ def fetch_themuse():
     jobs = []
     found = 0
     keyword_matched = 0
+    remote_filtered = 0
+    domain_filtered = 0
 
     for category in THE_MUSE_CATEGORIES:
         try:
@@ -637,16 +923,31 @@ def fetch_themuse():
         for raw_job in raw_jobs:
             locations = raw_job.get("locations") or []
             location_or_type = ", ".join(loc.get("name", "") for loc in locations) or "Remote"
+            description = strip_html(raw_job.get("contents", ""))
+
+            # The Muse is a general corporate job board (NOT remote-only)
+            # with no explicit remote/on-site flag - real city names with
+            # no remote mention (its most common case) are exactly the
+            # on-site listings this filter is meant to catch, so this is
+            # pure text classification, no source-level assumption.
+            remote_ok, location_or_type = _apply_remote_gate(location_or_type, description)
+            if not remote_ok:
+                remote_filtered += 1
+                continue
 
             job = build_normalized_job(
                 title=raw_job.get("name", ""),
                 company=(raw_job.get("company") or {}).get("name", ""),
                 location_or_type=location_or_type,
-                description=strip_html(raw_job.get("contents", "")),
+                description=description,
                 url=(raw_job.get("refs") or {}).get("landing_page", ""),
                 source="themuse",
                 date_posted=raw_job.get("publication_date"),
             )
+
+            if is_wrong_domain(job["text"]):
+                domain_filtered += 1
+                continue
 
             if not is_relevant(job["text"]) or is_dead_posting(job["text"]):
                 continue
@@ -655,7 +956,12 @@ def fetch_themuse():
             if job["freshness"] != "expired":
                 jobs.append(job)
 
-    return jobs, {"found": found, "keyword_matched": keyword_matched}
+    return jobs, {
+        "found": found,
+        "keyword_matched": keyword_matched,
+        "remote_filtered": remote_filtered,
+        "domain_filtered": domain_filtered,
+    }
 
 
 # WeWorkRemotely publishes one public RSS feed per category - "remote
@@ -696,6 +1002,8 @@ def fetch_weworkremotely():
     jobs = []
     found = len(raw_items)
     keyword_matched = 0
+    remote_filtered = 0
+    domain_filtered = 0
 
     for item_xml in raw_items:
         raw_title = _rss_field(item_xml, "title")
@@ -709,18 +1017,31 @@ def fetch_weworkremotely():
         location_or_type = f"{region or 'Remote'}" + (f" | {category}" if category else "")
 
         description_html = _rss_field(item_xml, "description")
+        description = strip_html(description_html)
         url = _rss_field(item_xml, "link")
         date_posted = _rfc2822_to_iso(_rss_field(item_xml, "pubDate"))
+
+        # WeWorkRemotely is a remote-jobs-only board - see REMOTE_FIRST_SOURCES.
+        remote_ok, location_or_type = _apply_remote_gate(
+            location_or_type, description, assume_remote_board=True
+        )
+        if not remote_ok:
+            remote_filtered += 1
+            continue
 
         job = build_normalized_job(
             title=title,
             company=company,
             location_or_type=location_or_type,
-            description=strip_html(description_html),
+            description=description,
             url=url,
             source="weworkremotely",
             date_posted=date_posted,
         )
+
+        if is_wrong_domain(job["text"]):
+            domain_filtered += 1
+            continue
 
         if not is_relevant(job["text"]) or is_dead_posting(job["text"]):
             continue
@@ -729,7 +1050,12 @@ def fetch_weworkremotely():
         if job["freshness"] != "expired":
             jobs.append(job)
 
-    return jobs, {"found": found, "keyword_matched": keyword_matched}
+    return jobs, {
+        "found": found,
+        "keyword_matched": keyword_matched,
+        "remote_filtered": remote_filtered,
+        "domain_filtered": domain_filtered,
+    }
 
 
 # One entry per source: name -> fetch function. To add a new source,
@@ -763,9 +1089,17 @@ def fetch_all_jobs(existing_jobs):
       produce a different exact hash and slip through as a "new" job.
 
     `stats` is a dict keyed by source name:
-        {"remoteok": {"found": N, "keyword_matched": K, "active": M, "duplicates": D, "added": A}, ...}
+        {"remoteok": {"found": N, "keyword_matched": K, "remote_filtered": R,
+        "domain_filtered": W, "active": M, "duplicates": D, "added": A}, ...}
     - "found": total real listings the source returned.
-    - "keyword_matched": how many of those matched an ML/AI keyword.
+    - "remote_filtered": how many were dropped for being on-site/hybrid
+      (STEP 2's remote-only gate - see classify_remote_status()).
+    - "domain_filtered": how many were dropped for being the wrong field
+      or a non-technical role (STEP 4's negative-keyword gate - see
+      is_wrong_domain()).
+    - "keyword_matched": how many of those matched an ML/AI keyword
+      (checked AFTER the two filters above, so this reflects the
+      relevant-AND-remote-AND-right-domain count).
     - "active": how many of the keyword-matched jobs are still an active
       listing (i.e. NOT dropped as expired - see posting_status()) - this
       is what actually gets considered for jobs.json. For every source
@@ -812,6 +1146,8 @@ def fetch_all_jobs(existing_jobs):
 
         stats[source_name] = {
             "found": funnel_stats["found"],
+            "remote_filtered": funnel_stats.get("remote_filtered", 0),
+            "domain_filtered": funnel_stats.get("domain_filtered", 0),
             "keyword_matched": funnel_stats["keyword_matched"],
             "active": len(active_relevant_jobs),
             "duplicates": duplicates,

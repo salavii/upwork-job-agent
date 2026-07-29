@@ -2369,6 +2369,8 @@ def cli_fetch_jobs():
     for source_name, source_stats in stats.items():
         print(
             f"{source_name}: {source_stats['found']} found, "
+            f"{source_stats.get('remote_filtered', 0)} dropped (on-site/hybrid), "
+            f"{source_stats.get('domain_filtered', 0)} dropped (wrong field/role), "
             f"{source_stats['keyword_matched']} matched keywords, "
             f"{source_stats['active']} still active (not expired), "
             f"{source_stats['duplicates']} already in {JOBS_JSON_FILE}, "
