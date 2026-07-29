@@ -114,6 +114,14 @@ FIT_SCORE_THRESHOLD = 40
 # jobs aren't worth spending the client's (or the model's) time on.
 PROPOSAL_SCORE_THRESHOLD = 70
 
+# Skill-gap analysis (per-job "Strong match, but missing: ..." line and
+# the aggregate "focus on these skills" summary - see
+# compute_skill_gap_summary()) only runs on jobs scoring ABOVE this -
+# these are the realistic near-misses worth analyzing; a job scoring 20
+# was never in reach regardless of which specific skills it's missing,
+# so listing its gaps would just be noise.
+SKILL_GAP_SCORE_THRESHOLD = 60
+
 # ============================================================
 # CODE-LEVEL scoring gates.
 #
@@ -223,21 +231,23 @@ EMPLOYEE_ONLY_RESTRICTION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Gate 5: JOB TYPE (SOFT penalty + flag, config-driven - see
-# WORK_ELIGIBILITY below). A posting explicitly offering contract/
-# freelance/part-time work always wins over an ambiguous or absent
-# employment-type mention; anything else that mentions "full-time" is
-# treated as a permanent EMPLOYEE role. Only penalized/flagged if
-# config.json's work_eligibility.full_time_employee_ok is false - the
-# default (missing section) is True, so this never affects anyone who
-# hasn't filled in that section.
+# Gate 5: JOB TYPE (HARD EXCLUSION, config-driven - see WORK_ELIGIBILITY
+# below). A posting explicitly offering contract/freelance/part-time
+# work always wins over an ambiguous or absent employment-type mention;
+# anything else that mentions "full-time" is treated as a permanent
+# EMPLOYEE role. If config.json's work_eligibility.full_time_employee_ok
+# is false, a job identified as full-time-employee is EXCLUDED ENTIRELY
+# from the persistent list (see update_persistent_job_list()) - not
+# penalized, not flagged, just never surfaced, since it's not a role
+# this profile is legally eligible for at all. The default (missing
+# work_eligibility section, or full_time_employee_ok left true) is a
+# complete no-op, so this never affects anyone without this constraint.
 CONTRACT_TYPE_PATTERN = re.compile(
     r"\b(contract|contractor|freelance|part[\s-]?time|1099"
     r"|independent contractor|c2c|corp-to-corp)\b",
     re.IGNORECASE,
 )
 FULL_TIME_PATTERN = re.compile(r"\bfull[\s-]?time\b", re.IGNORECASE)
-FULL_TIME_EMPLOYEE_PENALTY_POINTS = 10
 
 # Gate 4: DEAD POSTINGS. A posting that says there's no open role right
 # now isn't a job at all - see sources.py's is_dead_posting() for where
@@ -349,47 +359,40 @@ def is_full_time_employee_role(job_text):
     return bool(FULL_TIME_PATTERN.search(job_text))
 
 
-def full_time_employee_flag(job_text):
-    """
-    Gate 5 - informational flag companion to the score penalty in
-    apply_score_adjustments(). Returns None unless BOTH
-    work_eligibility.full_time_employee_ok is false (see WORK_ELIGIBILITY)
-    AND this specific posting reads as a full-time employee role - this
-    is a personal constraint from config.json, not a universal rule, so
-    it's silent by default for anyone who hasn't set it.
-    """
-    if WORK_ELIGIBILITY["full_time_employee_ok"]:
-        return None
-    if not is_full_time_employee_role(job_text):
-        return None
-    return (
-        "Full-time employee role - check eligibility "
-        "(currently limited to freelance/contract/part-time work)."
-    )
-
-
 def is_dead_posting(job_text):
     """Gate 4 - see DEAD_POSTING_PATTERN above."""
     return bool(DEAD_POSTING_PATTERN.search(job_text))
 
 
+def is_eligibility_excluded(job_text):
+    """
+    Gate 5 (HARD EXCLUSION) - True if this posting should be excluded
+    entirely: work_eligibility.full_time_employee_ok is false AND this
+    specific posting reads as a full-time EMPLOYEE role. Used by
+    update_persistent_job_list() to drop the job from the list outright
+    (see the module note on Gate 5 above for why this is an exclusion,
+    not a score penalty or a flag). Always False for anyone who hasn't
+    set full_time_employee_ok to false in config.json.
+    """
+    return not WORK_ELIGIBILITY["full_time_employee_ok"] and is_full_time_employee_role(job_text)
+
+
 def apply_score_adjustments(score, domain_fit, title, job_text):
     """
-    Apply the role-type HARD cap, then the seniority and full-time-
-    employee SOFT penalties (both can stack), and return the result (see
-    the gate comments above for why they're treated differently).
-    Location is intentionally NOT applied here at all - see
-    location_flag(), used separately to add an informational flag
-    without touching the score.
+    Apply the role-type HARD cap, then the seniority SOFT penalty, and
+    return the result (see the gate comments above for why they're
+    treated differently). Location is intentionally NOT applied here at
+    all - see location_flag(), used separately to add an informational
+    flag without touching the score. Full-time-employee eligibility is
+    ALSO not applied here - see is_eligibility_excluded() and Gate 5's
+    comment above for why that's a hard exclusion elsewhere, not a score
+    adjustment.
     """
     if not domain_fit or role_type_mismatch(title) or content_suggests_non_engineering_role(title, job_text):
         return min(score, DOMAIN_MISMATCH_SCORE_CAP)
 
     if seniority_mismatch(title, job_text):
         score = max(0, score - SENIORITY_PENALTY_POINTS)
-
-    if not WORK_ELIGIBILITY["full_time_employee_ok"] and is_full_time_employee_role(job_text):
-        score = max(0, score - FULL_TIME_EMPLOYEE_PENALTY_POINTS)
 
     return score
 
@@ -458,8 +461,16 @@ def load_profile_config(config):
 
 DEFAULT_LLM_PROVIDER = "ollama"
 DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
-DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_OPENAI_MODEL = "gpt-4o"
+
+# If a cloud call (Anthropic/OpenAI) errors for any reason (rate limit,
+# network blip, API outage), ask_llm() falls back to this LOCAL Ollama
+# model for THAT ONE request rather than failing the whole run - a
+# request-level safety net, distinct from DEFAULT_OLLAMA_MODEL (which is
+# used when Ollama itself is the configured PRIMARY provider). Requires
+# `ollama pull llama3.2` once, same as any other local model.
+FALLBACK_OLLAMA_MODEL = "llama3.2"
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
@@ -562,8 +573,8 @@ LLM_PROVIDER, MODEL_NAME = resolve_llm_provider(_config)
 
 # Your real-world work eligibility (see load_work_eligibility_config()
 # above) - used by the job-type gate (Gate 5: is_full_time_employee_role(),
-# full_time_employee_flag(), apply_score_adjustments()) to decide whether
-# full-time employee postings should be penalized/flagged at all.
+# is_eligibility_excluded(), update_persistent_job_list()) to decide
+# whether full-time employee postings should be excluded entirely.
 WORK_ELIGIBILITY = load_work_eligibility_config(_config)
 
 # Scoring rules for the model to follow. This has gone through several
@@ -683,6 +694,20 @@ Follow these steps before assigning a score:
    from step 1 too. A "gap" only counts if it maps to something on that
    list - a skill the job never mentioned or implied is IRRELEVANT and
    must NOT be listed as a gap or lower the score.
+6. Classify EACH gap you list as either:
+   - (quick to learn): a SPECIFIC, narrow tool/library/framework/API/
+     platform a competent engineer with the candidate's existing
+     background could realistically pick up in days to a few weeks
+     (e.g. "Docker", "a specific cloud provider's SDK", "GraphQL", "a
+     particular JS framework", "Terraform basics").
+   - (large gap): something that takes YEARS to build, not weeks - a
+     fundamentally different domain the candidate has no foothold in,
+     a specific number of years of professional/production experience,
+     a deep specialization, or a body of skills rather than one tool
+     (e.g. "5+ years of production MLOps experience", "deep expertise
+     in distributed systems", "a background in embedded/robotics").
+   When genuinely unsure whether a gap is quick or large, default to
+   (large gap) - it's the safer, less overclaiming label.
 
 Use these score anchors, based on the FRACTION from step 4 (this
 overrides any temptation to give a "medium" score just because SOME
@@ -733,18 +758,20 @@ STRENGTHS:
 - <strength 2>
 - <strength 3 (optional)>
 GAPS:
-- <gap - must be an item from JOB REQUIRES that the candidate lacks>
-- <gap 2 (optional, same rule)>
+- <gap - must be an item from JOB REQUIRES that the candidate lacks> (quick to learn|large gap)
+- <gap 2 (optional, same rule)> (quick to learn|large gap)
 FLAGS:
 - <a warning sign about the job itself, e.g. budget too low for the scope (optional - write "None" if there are no flags)>
 VERDICT: <one short sentence>
 """
 
 
-def ask_ollama(prompt, temperature=0):
+def ask_ollama(prompt, temperature=0, model=None):
     """
     Send `prompt` to the local Ollama server and return the model's
-    text reply as a string.
+    text reply as a string. `model` overrides MODEL_NAME for this one
+    call - used by ask_llm()'s cloud-provider fallback path to force
+    FALLBACK_OLLAMA_MODEL regardless of what the primary provider is.
 
     How it works:
     - Ollama's /api/generate endpoint expects a JSON body with at least
@@ -769,7 +796,7 @@ def ask_ollama(prompt, temperature=0):
       dictionary, so that's what we return.
     """
     request_body = {
-        "model": MODEL_NAME,
+        "model": model or MODEL_NAME,
         "prompt": prompt,
         "stream": False,
         "options": {
@@ -843,16 +870,44 @@ def ask_openai(prompt, temperature=0):
 def ask_llm(prompt, temperature=0):
     """
     Send `prompt` to whichever LLM provider config.json selects (see
-    resolve_llm_provider()) and return its text reply. This is the ONLY
-    function score_job()/draft_proposal() call - swapping providers
-    means changing config.json, never touching scoring logic, prompts,
-    gates, or output format.
+    resolve_llm_provider()) and return (reply_text, model_label). This
+    is the ONLY function score_job()/draft_proposal() call - swapping
+    providers means changing config.json, never touching scoring logic,
+    prompts, gates, or output format.
+
+    `model_label` records EXACTLY which backend/model produced THIS
+    reply (e.g. "anthropic:claude-haiku-4-5-20251001") - see
+    run_scoring_and_report()'s "model" cache field. This can differ from
+    what config.json asks for: if a cloud call errors (rate limit,
+    network blip, API outage), this call falls back to the local
+    FALLBACK_OLLAMA_MODEL for just this one request instead of failing
+    the whole run, and the label reflects that ("ollama:llama3.2
+    (fallback)") so the cache never lies about which model actually
+    answered.
     """
     if LLM_PROVIDER == "anthropic":
-        return ask_anthropic(prompt, temperature=temperature)
+        try:
+            return ask_anthropic(prompt, temperature=temperature), f"anthropic:{MODEL_NAME}"
+        except requests.exceptions.RequestException as error:
+            print(
+                f"WARNING: Anthropic API call failed ({error}) - falling back to "
+                f"local Ollama ({FALLBACK_OLLAMA_MODEL}) for this request."
+            )
+            reply = ask_ollama(prompt, temperature=temperature, model=FALLBACK_OLLAMA_MODEL)
+            return reply, f"ollama:{FALLBACK_OLLAMA_MODEL} (fallback)"
+
     if LLM_PROVIDER == "openai":
-        return ask_openai(prompt, temperature=temperature)
-    return ask_ollama(prompt, temperature=temperature)
+        try:
+            return ask_openai(prompt, temperature=temperature), f"openai:{MODEL_NAME}"
+        except requests.exceptions.RequestException as error:
+            print(
+                f"WARNING: OpenAI API call failed ({error}) - falling back to "
+                f"local Ollama ({FALLBACK_OLLAMA_MODEL}) for this request."
+            )
+            reply = ask_ollama(prompt, temperature=temperature, model=FALLBACK_OLLAMA_MODEL)
+            return reply, f"ollama:{FALLBACK_OLLAMA_MODEL} (fallback)"
+
+    return ask_ollama(prompt, temperature=temperature), f"ollama:{MODEL_NAME}"
 
 
 def score_job(job_text, temperature=0):
@@ -873,8 +928,9 @@ def score_job(job_text, temperature=0):
          RESPONSE_FORMAT_INSTRUCTIONS above), so the reply is
          consistent and easy to read every time.
 
-    Returns the model's raw reply as a string (already in the format
-    described above), which we can print directly.
+    Returns (raw_reply, model_label) - raw_reply is the model's reply
+    string (already in the format described above), model_label records
+    which backend/model actually produced it (see ask_llm()).
 
     `temperature` defaults to 0 for the normal, deterministic case (see
     the comment on ask_ollama() for why). run_scoring_and_report() passes
@@ -976,8 +1032,10 @@ no notes about word count or which domain you picked.
 """
 
     # temperature=0.7 (higher than scoring) so the writing sounds natural
-    # instead of terse/robotic - see the docstring above for why.
-    raw_reply = ask_llm(prompt, temperature=0.7)
+    # instead of terse/robotic - see the docstring above for why. The
+    # model label isn't tracked for proposals (only the scoring cache
+    # needs "model" - see PART 1/run_scoring_and_report()).
+    raw_reply, _model_label = ask_llm(prompt, temperature=0.7)
 
     # The prompt above already asks for no preamble, but an 8B model
     # doesn't always obey that - strip_proposal_preamble() is the
@@ -1183,6 +1241,33 @@ def dedupe_job_list_by_url(current_jobs):
     return len(hashes_to_drop)
 
 
+def remove_ineligible_jobs(current_jobs, jobs_by_hash):
+    """
+    Retroactively drop any EXISTING persistent-list entries that read as
+    full-time EMPLOYEE roles, now that Gate 5 (see is_eligibility_excluded())
+    is a hard exclusion rather than the soft penalty/flag it used to be -
+    without this, a job added to the list under the old behavior would
+    linger forever even though it's no longer eligible to be shown.
+    Mutates `current_jobs` in place and returns how many were dropped.
+
+    `jobs_by_hash` maps job hash -> job text (built from jobs.json by the
+    caller), since job_list.json's entries don't store the full text
+    themselves - only jobs.json does.
+    """
+    if WORK_ELIGIBILITY["full_time_employee_ok"]:
+        return 0  # no restriction configured - nothing to retroactively remove
+
+    to_remove = [
+        job_hash
+        for job_hash in current_jobs
+        if job_hash in jobs_by_hash and is_eligibility_excluded(jobs_by_hash[job_hash])
+    ]
+    for job_hash in to_remove:
+        del current_jobs[job_hash]
+
+    return len(to_remove)
+
+
 def update_persistent_job_list():
     """
     Add newly-qualifying automatically-sourced jobs to the persistent
@@ -1201,6 +1286,10 @@ def update_persistent_job_list():
       apply_score_adjustments(), so this should never independently
       change the outcome, but checking it explicitly costs nothing and
       guards against the threshold being tuned down later).
+    - it's NOT excluded by the work-eligibility gate (see
+      is_eligibility_excluded() - a full-time EMPLOYEE posting when
+      you're only eligible for part-time/remote/freelance/contract work
+      is dropped here entirely, not scored down or flagged).
     - its URL isn't already covered by a higher (or equally) scoring
       entry already in the list (see dedupe_job_list_by_url() above) -
       if it scores HIGHER than the existing entry for that same URL,
@@ -1218,10 +1307,13 @@ def update_persistent_job_list():
 
     removed_hashes = set(job_list["removed_hashes"])
     current_jobs = job_list["jobs"]
+    jobs_by_hash = {hash_job_text(j.get("text", "")): j.get("text", "") for j in jobs}
 
-    # Retroactively clean up any URL duplicates already in the list
-    # (e.g. from before this fix existed) before considering new jobs.
+    # Retroactively clean up any URL duplicates, and any now-ineligible
+    # full-time-employee entries, already in the list before considering
+    # new jobs (see dedupe_job_list_by_url()/remove_ineligible_jobs()).
     deduped_count = dedupe_job_list_by_url(current_jobs)
+    remove_ineligible_jobs(current_jobs, jobs_by_hash)
 
     url_to_hash = {entry["url"]: h for h, entry in current_jobs.items() if entry.get("url")}
 
@@ -1243,6 +1335,9 @@ def update_persistent_job_list():
         if cached["score"] <= FIT_SCORE_THRESHOLD or role_type_mismatch(title):
             continue
 
+        if is_eligibility_excluded(job_text):
+            continue  # full-time employee role, not eligible - excluded entirely
+
         url = job.get("url", "")
         existing_hash = url_to_hash.get(url) if url else None
         if existing_hash is not None:
@@ -1255,6 +1350,7 @@ def update_persistent_job_list():
             "score": cached["score"],
             "verdict": cached["verdict"],
             "flags": cached.get("flags", []),
+            "gaps": cached.get("gaps", []),
             "source": job.get("source", "upwork-extension"),
             "url": url,
             "date_posted": job.get("date_added", ""),
@@ -1334,6 +1430,49 @@ def parse_flags(raw_reply):
             flags.append(flag_text)
 
     return flags
+
+
+GAP_CATEGORY_PATTERN = re.compile(r"^(.*?)\s*\((quick to learn|large gap)\)", re.IGNORECASE)
+
+
+def parse_gaps(raw_reply):
+    """
+    Pull the bullet lines under "GAPS:" out of a score_job() reply - see
+    RESPONSE_FORMAT_INSTRUCTIONS/STRICT_SCORING_GUIDELINES step 6 for the
+    "(quick to learn)"/"(large gap)" label every gap is supposed to
+    carry. Used by the skill-gap-analysis feature (see
+    compute_skill_gap_summary() and build_daily_job_card_html()) to tell
+    a genuine near-miss (missing one learnable tool) from a job that was
+    never realistically in reach.
+
+    Returns a list of {"text": <gap description>, "category": "quick" |
+    "large"} dicts. A gap line the model forgot to label (or the model's
+    label didn't match either exact phrase) defaults to "large" - the
+    same "when unsure, don't overclaim it's easy" rule the prompt itself
+    is given, applied again here as a code-level backstop.
+    """
+    gaps_match = re.search(r"GAPS:\s*(.*?)(?:\n\s*FLAGS:|\Z)", raw_reply, re.DOTALL)
+    if not gaps_match:
+        return []
+
+    gaps = []
+    for line in gaps_match.group(1).splitlines():
+        line_text = line.strip().lstrip("-").strip()
+        if not line_text or line_text.lower() in ("none", "none.", "n/a"):
+            continue
+
+        category_match = GAP_CATEGORY_PATTERN.match(line_text)
+        if category_match:
+            gap_text = category_match.group(1).strip()
+            category = "quick" if "quick" in category_match.group(2).lower() else "large"
+        else:
+            gap_text = line_text
+            category = "large"
+
+        if gap_text:
+            gaps.append({"text": gap_text, "category": category})
+
+    return gaps
 
 
 # Component names matching any of these are administrative/deliverable
@@ -1732,12 +1871,39 @@ def format_iso_timestamp_date(iso_timestamp):
         return iso_timestamp
 
 
+def build_gap_line_html(entry):
+    """
+    Build the "Strong match, but missing: ..." line for a single job
+    card - see PART 6(a) of the skill-gap-analysis feature. Only shown
+    for jobs scoring ABOVE SKILL_GAP_SCORE_THRESHOLD (a genuine
+    near-miss is worth analyzing; a low-scoring job's gaps are just
+    noise) that actually have at least one gap recorded. Returns "" if
+    neither condition holds.
+    """
+    if entry["score"] <= SKILL_GAP_SCORE_THRESHOLD or not entry.get("gaps"):
+        return ""
+
+    quick = [g["text"] for g in entry["gaps"] if g["category"] == "quick"]
+    large = [g["text"] for g in entry["gaps"] if g["category"] == "large"]
+
+    parts = []
+    if quick:
+        parts.append(f'<strong>quick to learn:</strong> {html.escape(", ".join(quick))}')
+    if large:
+        parts.append(f'<strong>large gap:</strong> {html.escape(", ".join(large))}')
+    if not parts:
+        return ""
+
+    return f'<p class="gap-line">Strong match, but missing: {" &middot; ".join(parts)}</p>'
+
+
 def build_daily_job_card_html(job_hash, entry):
     """
     Build the HTML for a single card in the persistent daily_report.html
     list: score, a colored source badge, both date stamps (when the
     posting says it was posted, and when THIS tool first found it),
-    title, verdict/flags, a prominent "Open job" link, and a "Remove"
+    title, verdict/flags, a skill-gap line for near-miss jobs (see
+    build_gap_line_html()), a prominent "Open job" link, and a "Remove"
     button that permanently deletes this job from JOB_LIST_FILE (see
     server.py's /remove_daily_job). Deliberately no proposal/cover-letter
     section - see run_scoring_and_report()'s draft_proposals docstring
@@ -1778,8 +1944,90 @@ def build_daily_job_card_html(job_hash, entry):
         <h3 class="job-title">{html.escape(entry['title'])}</h3>
         <p class="date-stamps">Posted: {html.escape(posted_display)} &middot; Found: {html.escape(found_display)}</p>
         <p class="verdict">{html.escape(entry['verdict'])}</p>
+        {build_gap_line_html(entry)}
         {flags_html}
         {link_html}
+    </div>
+    """
+
+
+def compute_skill_gap_summary(jobs_dict):
+    """
+    Aggregate skill gaps across every job in `jobs_dict` scoring ABOVE
+    SKILL_GAP_SCORE_THRESHOLD - see PART 6(b) of the skill-gap-analysis
+    feature: "the market keeps asking for these; focus here first."
+    Gaps are grouped by their EXACT text (simple, not fuzzy-matched - two
+    postings both saying "Docker" count together, "Docker" and
+    "containerization" don't, since we can't reliably tell those are the
+    same thing without another LLM call).
+
+    Returns (quick_wins, large_gaps): each a list of (gap_text, count)
+    tuples sorted by count descending (most-requested first). quick_wins
+    is what to actually act on first per PART 6(b) - a gap that's both
+    frequent AND learnable in days/weeks is the highest-value thing to
+    pick up next; large_gaps is shown too, for visibility, but isn't
+    something a few weekends fixes.
+    """
+    quick_counts = {}
+    large_counts = {}
+
+    for entry in jobs_dict.values():
+        if entry["score"] <= SKILL_GAP_SCORE_THRESHOLD:
+            continue
+        for gap in entry.get("gaps", []):
+            counts = quick_counts if gap["category"] == "quick" else large_counts
+            key = gap["text"].strip()
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+
+    quick_wins = sorted(quick_counts.items(), key=lambda kv: -kv[1])
+    large_gaps = sorted(large_counts.items(), key=lambda kv: -kv[1])
+    return quick_wins, large_gaps
+
+
+def build_skill_gap_summary_html(jobs_dict):
+    """
+    Build the "Focus on these skills" section for daily_report.html (see
+    compute_skill_gap_summary()) - an aggregate view across every
+    near-miss job (score > SKILL_GAP_SCORE_THRESHOLD) in the current
+    list, ranked by how often each gap shows up. Returns "" if there are
+    no near-miss jobs with recorded gaps at all, so the section simply
+    doesn't render rather than showing an empty shell.
+    """
+    quick_wins, large_gaps = compute_skill_gap_summary(jobs_dict)
+    if not quick_wins and not large_gaps:
+        return ""
+
+    def build_list_html(items):
+        return "".join(
+            f"<li>{html.escape(text)} <span class=\"gap-count\">&times;{count}</span></li>"
+            for text, count in items
+        )
+
+    quick_html = ""
+    if quick_wins:
+        quick_html = f"""
+        <h3>Quick wins (learnable in days/weeks)</h3>
+        <ol class="gap-summary-list">{build_list_html(quick_wins)}</ol>
+        """
+
+    large_html = ""
+    if large_gaps:
+        large_html = f"""
+        <h3>Bigger investments (years of experience / different domain)</h3>
+        <ol class="gap-summary-list">{build_list_html(large_gaps)}</ol>
+        """
+
+    return f"""
+    <div class="gap-summary-section">
+        <h2>🎯 Focus on these skills</h2>
+        <p class="gap-summary-intro">Aggregated from every job scoring above
+        {SKILL_GAP_SCORE_THRESHOLD} in your list right now - these are the
+        gaps that keep costing you a clean match. Quick wins first: a gap
+        that's both frequent AND learnable in days/weeks unlocks the most
+        near-miss jobs for the least effort.</p>
+        {quick_html}
+        {large_html}
     </div>
     """
 
@@ -1811,6 +2059,8 @@ def build_daily_report_html(jobs_dict):
     # this first pass instead of an arbitrary one.
     sorted_items = sorted(jobs_dict.items(), key=lambda item: item[1].get("date_found", ""), reverse=True)
     sorted_items.sort(key=lambda item: item[1]["score"], reverse=True)
+
+    gap_summary_html = build_skill_gap_summary_html(jobs_dict)
 
     if sorted_items:
         cards_html = "".join(build_daily_job_card_html(job_hash, entry) for job_hash, entry in sorted_items)
@@ -1971,6 +2221,47 @@ def build_daily_report_html(jobs_dict):
     .empty-state {{
         color: #666;
     }}
+    .gap-line {{
+        margin: 8px 0 0 0;
+        padding: 8px 12px;
+        font-size: 13px;
+        color: #4a3b6b;
+        background-color: #f2eefc;
+        border-left: 4px solid #8a63d2;
+        border-radius: 6px;
+    }}
+    .gap-summary-section {{
+        background-color: #ffffff;
+        border-radius: 8px;
+        padding: 18px 22px;
+        margin: 0 0 24px 0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }}
+    .gap-summary-section h2 {{
+        margin: 0 0 8px 0;
+    }}
+    .gap-summary-section h3 {{
+        margin: 16px 0 6px 0;
+        font-size: 14px;
+        color: #333;
+    }}
+    .gap-summary-intro {{
+        margin: 0;
+        font-size: 13px;
+        color: #555;
+    }}
+    .gap-summary-list {{
+        margin: 0;
+        padding-left: 22px;
+        font-size: 13px;
+    }}
+    .gap-summary-list li {{
+        margin: 4px 0;
+    }}
+    .gap-count {{
+        color: #888;
+        font-size: 12px;
+    }}
 </style>
 </head>
 <body>
@@ -1984,6 +2275,7 @@ def build_daily_report_html(jobs_dict):
         YOU remove a job below or click "Clear all."</p>
         <button id="clear-all-button" class="clear-all-button">Clear all</button>
     </div>
+    {gap_summary_html}
     {cards_html}
 
     <script>
@@ -2294,21 +2586,34 @@ def run_scoring_and_report(use_cache, draft_proposals=True):
     jobs = load_jobs(JOBS_JSON_FILE)
     results_cache = load_results()
 
-    print(f"Loaded {len(jobs)} jobs from {JOBS_JSON_FILE}. Scoring each with {MODEL_NAME}...\n")
+    print(
+        f"Loaded {len(jobs)} jobs from {JOBS_JSON_FILE}. Scoring each with "
+        f"{LLM_PROVIDER}:{MODEL_NAME} (fallback: ollama:{FALLBACK_OLLAMA_MODEL})...\n"
+    )
 
     for job in jobs:
         job_text = job.get("text", "")
         title, _ = extract_title_and_metadata(job_text)
         job_hash = hash_job_text(job_text)
 
-        # Reuse a cached result if we have one for this exact job text
-        # and the caller didn't ask for a fresh re-score (--fresh).
-        if use_cache and job_hash in results_cache:
+        cached_entry = results_cache.get(job_hash)
+        # Reuse a cached result only if it's present, the caller didn't
+        # ask for a fresh re-score (--fresh), AND it has a "model" field.
+        # An entry missing "model" is a LEGACY entry from before this
+        # field existed (or from a mixed-model cache before a provider
+        # switch) - we can't trust which backend actually produced it,
+        # so it's treated the same as "not scored yet" and gets a fresh
+        # score here (which will then carry a proper "model" label).
+        if use_cache and cached_entry is not None and "model" in cached_entry:
             print(f"Reused cached: {title}")
             continue
 
-        print(f"Scoring new: {title}")
-        raw_reply = score_job(job_text)
+        if cached_entry is not None:
+            print(f"Scoring new (legacy cache entry, no model recorded): {title}")
+        else:
+            print(f"Scoring new: {title}")
+
+        raw_reply, model_label = score_job(job_text)
         computed_score = compute_score_from_components(raw_reply)
 
         # The model occasionally skips the (yes)/(partial)/(no) labels
@@ -2319,11 +2624,12 @@ def run_scoring_and_report(use_cache, draft_proposals=True):
         # (hopefully compliant) answer.
         if computed_score is None:
             print(f"  (retrying - missing component labels: {title})")
-            raw_reply = score_job(job_text, temperature=0.2)
+            raw_reply, model_label = score_job(job_text, temperature=0.2)
             computed_score = compute_score_from_components(raw_reply)
 
         score, verdict = parse_score_and_verdict(raw_reply)
         flags = parse_flags(raw_reply)
+        gaps = parse_gaps(raw_reply)
 
         # Prefer the score computed deterministically from the
         # COMPONENTS classification over the model's own (unreliable)
@@ -2333,23 +2639,21 @@ def run_scoring_and_report(use_cache, draft_proposals=True):
         if computed_score is not None:
             score = computed_score
 
-        # Code-level gates - role type (hard cap), seniority + full-time-
-        # employee (soft penalties) - see apply_score_adjustments() above
-        # for why these are enforced in code rather than trusted to the
-        # model's own judgment. Location and full-time-employee status
-        # are flags only, added to `flags` below - the employee flag
-        # accompanies a real score penalty (applied above), location
-        # never affects the score at all.
+        # Code-level gates - role type (hard cap) and seniority (soft
+        # penalty) - see apply_score_adjustments() above for why these
+        # are enforced in code rather than trusted to the model's own
+        # judgment. Location is a flag only, added to `flags` below and
+        # never affecting the score. The full-time-employee gate is NOT
+        # applied here at all any more - it's a hard EXCLUSION from the
+        # persistent list (see update_persistent_job_list()), not a
+        # score penalty or a flag, so an ineligible job's raw score stays
+        # untouched in the cache (useful if eligibility ever changes).
         domain_fit = parse_domain_fit(raw_reply)
         score = apply_score_adjustments(score, domain_fit, title, job_text)
 
         location_warning = location_flag(job_text)
         if location_warning:
             flags = flags + [location_warning]
-
-        employee_warning = full_time_employee_flag(job_text)
-        if employee_warning:
-            flags = flags + [employee_warning]
 
         # Only draft a proposal for high-scoring jobs - it's not worth
         # spending the model's (or the client's) time on a poor fit. And
@@ -2365,13 +2669,14 @@ def run_scoring_and_report(use_cache, draft_proposals=True):
             "verdict": verdict,
             "proposal": proposal,
             "flags": flags,
+            "gaps": gaps,
+            "model": model_label,
         }
 
         # Save after EVERY job, not just once at the end - a full run can
-        # take a long time (dozens of jobs x ~70s of Ollama calls each),
-        # and without this, an interrupted run (crash, Ctrl+C, killed
-        # process) would lose every score computed so far, forcing a
-        # full re-score from scratch on the next attempt.
+        # take a long time, and without this, an interrupted run (crash,
+        # Ctrl+C, killed process) would lose every score computed so
+        # far, forcing a full re-score from scratch on the next attempt.
         save_results(results_cache)
 
     # Everything is already saved incrementally above; this final call is
