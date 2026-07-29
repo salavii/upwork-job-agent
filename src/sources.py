@@ -116,6 +116,14 @@ KEYWORD_PATTERNS = [
     r"model training",
     r"embeddings?",
     r"vector database",
+    r"\bAI trainer\b",
+    r"\bLLM evaluator\b",
+    r"model evaluation",
+    r"\bred[\s-]?team(ing)?\b",
+    r"\bRLHF\b",
+    r"reinforcement learning from human feedback",
+    r"\bannotation\b",
+    r"\bdata annotator\b",
 ]
 RELEVANT_KEYWORDS_PATTERN = re.compile("|".join(KEYWORD_PATTERNS), re.IGNORECASE)
 

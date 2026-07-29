@@ -646,20 +646,35 @@ Follow these steps before assigning a score:
    what the job is about) versus NICE-TO-HAVE requirements (secondary
    features, bonus skills, or minor details).
 2. Break the job down into its main COMPONENTS - the 2-6 top-level,
-   NON-OVERLAPPING skill-areas the work actually consists of (e.g. for a
-   job building a desktop app with 3D avatars, voice, a database, and an
-   installer, the components might be: "3D rendering/avatars",
-   "voice/audio", "database design", "real-time networking",
-   "installer/packaging"). Keep this to a short, high-level list (aim
-   for 3-6, never more than 8), not a granular checklist. Do NOT list
-   the same underlying skill twice under different names (e.g. don't
-   list both "mobile app development" and "iOS and Android development"
-   as separate components - that's one component, not two). Do NOT
-   create a separate component for administrative/deliverable items like
-   "documentation", "installation guide", or "configuration files" -
-   these are just paperwork attached to the OTHER technical components,
-   not a skill area of their own, and must not be counted as if they
-   were.
+   NON-OVERLAPPING skill-areas the CORE/MANDATORY part of the work
+   actually consists of (e.g. for a job building a desktop app with 3D
+   avatars, voice, a database, and an installer, the components might
+   be: "3D rendering/avatars", "voice/audio", "database design",
+   "real-time networking", "installer/packaging"). Keep this to a short,
+   high-level list (aim for 3-6, never more than 8), not a granular
+   checklist. Do NOT list the same underlying skill twice under
+   different names (e.g. don't list both "mobile app development" and
+   "iOS and Android development" as separate components - that's one
+   component, not two). Do NOT create a separate component for
+   administrative/deliverable items like "documentation", "installation
+   guide", or "configuration files" - these are just paperwork attached
+   to the OTHER technical components, not a skill area of their own, and
+   must not be counted as if they were.
+   Do NOT create a component for a requirement the posting itself marks
+   as OPTIONAL - anything phrased as "nice to have", "a plus", "bonus",
+   "desirable", "preferred", or "ideally" is explicitly NOT something the
+   candidate must already have, so it must never lower the score. These
+   still belong in JOB REQUIRES (as a NICE-TO-HAVE item, not marked
+   (core)) and can still be listed in GAPS if genuinely missing, but they
+   are excluded from COMPONENTS and from the fraction in step 4 entirely.
+   Likewise, do NOT create a component for a skill the posting frames as
+   something the candidate will be TAUGHT or is expected to pick up ON
+   THE JOB - phrases like "willingness to learn X", "no prior experience
+   with Y required", "we'll train you on Z" mean the posting itself is
+   saying this is not a prerequisite, so it must never count against the
+   candidate (common in internship/entry-level/junior postings - don't
+   penalize a strong-fitting internship for lacking a skill the posting
+   explicitly says it will teach).
 3. For EACH component, judge whether the candidate profile can deliver
    it - BE STRICT AND LITERAL:
    - YES: that exact skill, tool, or a very close synonym of it is
@@ -689,7 +704,10 @@ Follow these steps before assigning a score:
    PARTIAL) / (total number of components). Compute this as an actual
    number, do not guess or default to "about half" - a job where the
    candidate is YES on 1 of 5 components and NO on the rest has a
-   fraction of 0.2, not 0.5.
+   fraction of 0.2, not 0.5. Since step 2 already excluded optional/
+   nice-to-have/learn-on-the-job items, this fraction reflects the CORE
+   requirements only - a missing optional skill never appears here at
+   all, so it cannot drag the fraction down.
 5. Compare the candidate profile against the MANDATORY/CORE requirements
    from step 1 too. A "gap" only counts if it maps to something on that
    list - a skill the job never mentioned or implied is IRRELEVANT and
@@ -1268,6 +1286,63 @@ def remove_ineligible_jobs(current_jobs, jobs_by_hash):
     return len(to_remove)
 
 
+def compute_display_remote_status(job_text, source, flags):
+    """
+    Eligibility-tag feature - classify a job for the purely INFORMATIONAL
+    (Yes/warning/unclear) tag shown on its card (see
+    build_eligibility_tag_html()). This never removes a job from the list
+    - the persistent list already only accepts remote/eligible jobs going
+    forward (sources.py's fetch-time remote-only gate, and
+    is_eligibility_excluded()'s full-time-employee exclusion) - this is
+    just a second, visible confirmation, and the only way a LEGACY entry
+    added before those gates existed (or a manually-saved Upwork job,
+    which never goes through sources.py's fetch pipeline at all) gets
+    classified too.
+
+    Returns "remote", "excluded" (on-site/hybrid), or "unconfirmed" - the
+    same three values as sources.classify_remote_status(), which this
+    delegates to for automatically-sourced jobs (re-parsing the same
+    "title — company\\n\\nlocation/type\\n\\ndescription" shape their
+    "text" is built in).
+
+    Manually-saved Upwork postings (source == "upwork-extension", or no
+    job_text at all) are inherently freelance/contract/remote-from-
+    anywhere by the nature of the platform, so they default to "remote"
+    UNLESS an existing flag (see location_flag(), Gate 3) already signals
+    an on-site/citizenship/clearance/relocation requirement.
+
+    ALSO checked for every job, regardless of source: the LLM's own
+    FLAGS often catch a full-time-employee requirement that the
+    regex-based FULL_TIME_PATTERN gate misses (e.g. a posting that reads
+    as clearly permanent without literally containing the word
+    "full-time") - a job flagged that way is downgraded to "excluded"
+    here even if its location text alone would read as remote, since
+    "remote" alone doesn't help if the role itself is full-time
+    employment your permit doesn't allow. This is the same reasoning
+    that surfaced the gap in the first place: is_eligibility_excluded()
+    only catches what its own regex catches, and legacy entries added
+    before that gate existed can still be sitting in the list.
+    """
+    flags_text = " ".join(flags).lower()
+    if any(
+        term in flags_text
+        for term in ("full-time employ", "full time employ", "permanent employ", "permanent full-time")
+    ):
+        return "excluded"
+
+    if source == "upwork-extension" or not job_text:
+        if any(term in flags_text for term in ("on-site", "onsite", "citizenship", "clearance", "relocation")):
+            return "excluded"
+        return "remote"
+
+    parts = job_text.split("\n\n")
+    location_or_type = parts[1] if len(parts) > 1 else ""
+    description = parts[2] if len(parts) > 2 else ""
+    return sources.classify_remote_status(
+        location_or_type, description, assume_remote_board=(source in sources.REMOTE_FIRST_SOURCES)
+    )
+
+
 def update_persistent_job_list():
     """
     Add newly-qualifying automatically-sourced jobs to the persistent
@@ -1345,16 +1420,24 @@ def update_persistent_job_list():
                 continue  # same posting, already covered by an equal-or-better entry
             del current_jobs[existing_hash]  # same posting, but this one scored higher - replace it
 
+        job_source = job.get("source", "upwork-extension")
+        location_hint = ""
+        if "\n\n" in job_text:
+            text_parts = job_text.split("\n\n")
+            location_hint = text_parts[1] if len(text_parts) > 1 else ""
+
         current_jobs[job_hash] = {
             "title": title,
             "score": cached["score"],
             "verdict": cached["verdict"],
             "flags": cached.get("flags", []),
             "gaps": cached.get("gaps", []),
-            "source": job.get("source", "upwork-extension"),
+            "source": job_source,
             "url": url,
             "date_posted": job.get("date_added", ""),
             "date_found": datetime.datetime.now().isoformat(timespec="seconds"),
+            "remote_status": compute_display_remote_status(job_text, job_source, cached.get("flags", [])),
+            "location_hint": location_hint,
         }
         if url:
             url_to_hash[url] = job_hash
@@ -1897,17 +1980,50 @@ def build_gap_line_html(entry):
     return f'<p class="gap-line">Strong match, but missing: {" &middot; ".join(parts)}</p>'
 
 
+ELIGIBILITY_TAG_LABELS = {
+    "remote": ("eligibility-ok", "✅ Remote-OK from Italy"),
+    "unconfirmed": ("eligibility-unclear", "❓ Unclear — verify"),
+}
+
+
+def build_eligibility_tag_html(entry):
+    """
+    Eligibility-tag feature - a purely INFORMATIONAL badge (does not
+    affect score, ranking, or inclusion) showing at a glance whether this
+    job works for an Italy study-permit situation (remote/worldwide/EU/
+    freelance/contract), needs a manual check (on-site/hybrid, or a
+    specific country - see compute_display_remote_status()), or couldn't
+    be confidently classified either way. See ELIGIBILITY_TAG_LABELS for
+    the remote/unconfirmed cases; "excluded" gets a dynamic label below
+    since it's the only one that wants to show WHERE the job is on-site.
+    """
+    remote_status = entry.get("remote_status", "unconfirmed")
+
+    if remote_status in ELIGIBILITY_TAG_LABELS:
+        css_class, label = ELIGIBILITY_TAG_LABELS[remote_status]
+    else:
+        css_class = "eligibility-warning"
+        location_hint = (entry.get("location_hint") or "").strip() or "On-site"
+        label = f"⚠️ {location_hint} — work-permit check needed"
+
+    return f'<span class="eligibility-tag {css_class}">{html.escape(label)}</span>'
+
+
 def build_daily_job_card_html(job_hash, entry):
     """
     Build the HTML for a single card in the persistent daily_report.html
-    list: score, a colored source badge, both date stamps (when the
-    posting says it was posted, and when THIS tool first found it),
-    title, verdict/flags, a skill-gap line for near-miss jobs (see
-    build_gap_line_html()), a prominent "Open job" link, and a "Remove"
+    list: score, a colored source badge, an eligibility tag (see
+    build_eligibility_tag_html()), both date stamps (when the posting
+    says it was posted, and when THIS tool first found it), title,
+    verdict/flags, a skill-gap line for near-miss jobs (see
+    build_gap_line_html()), a prominent "Apply" link, and a "Remove"
     button that permanently deletes this job from JOB_LIST_FILE (see
     server.py's /remove_daily_job). Deliberately no proposal/cover-letter
     section - see run_scoring_and_report()'s draft_proposals docstring
-    for why this flow skips that step entirely.
+    for why this flow skips that step entirely. The "Apply" link just
+    opens the original posting in a new tab - nothing here ever submits
+    anything on your behalf, see the README's note on why applying stays
+    manual.
     """
     color = score_to_color(entry["score"])
     badge_color = SOURCE_BADGE_COLORS.get(entry["source"], SOURCE_BADGE_DEFAULT_COLOR)
@@ -1929,7 +2045,7 @@ def build_daily_job_card_html(job_hash, entry):
     if entry["url"]:
         link_html = (
             f'<a class="open-job-button" href="{html.escape(entry["url"])}" '
-            f'target="_blank" rel="noopener noreferrer">Open job &rarr;</a>'
+            f'target="_blank" rel="noopener noreferrer">Apply &rarr;</a>'
         )
 
     return f"""
@@ -1940,6 +2056,7 @@ def build_daily_job_card_html(job_hash, entry):
         </div>
         <div class="badges-row">
             <span class="source-badge" style="background-color: {badge_color};">{html.escape(entry['source'])}</span>
+            {build_eligibility_tag_html(entry)}
         </div>
         <h3 class="job-title">{html.escape(entry['title'])}</h3>
         <p class="date-stamps">Posted: {html.escape(posted_display)} &middot; Found: {html.escape(found_display)}</p>
@@ -2040,25 +2157,39 @@ def build_daily_report_html(jobs_dict):
     ACCUMULATES across every --daily run rather than being regenerated
     from scratch - see the module-level comment on JOB_LIST_FILE.
 
-    Sorted highest-SCORE-first, always - that's the whole point of a fit
-    list. Ties are broken by newest-found-first (`date_found` is always a
-    precise timestamp, unlike `date_posted`, which some sources don't
-    provide), just so equally-scored jobs have a stable, sensible order
-    rather than whatever order the dict happened to iterate in.
+    Grouped by eligibility tier FIRST (confirmed-remote jobs, then
+    unconfirmed, then on-site/needs-a-check - see
+    build_eligibility_tag_html()), and highest-SCORE-first WITHIN each
+    tier - so the postings that unambiguously work for an Italy study
+    permit are always easiest to find, at the top, without hiding or
+    removing anything else. Ties are broken by newest-found-first
+    (`date_found` is always a precise timestamp, unlike `date_posted`,
+    which some sources don't provide), just so equally-scored jobs have a
+    stable, sensible order rather than whatever order the dict happened
+    to iterate in.
 
     Each card has a "Remove" (x) button (server.py's /remove_daily_job)
     that permanently deletes it from JOB_LIST_FILE, and the page has one
     "Clear all" button (server.py's /clear_daily_list) to wipe the whole
-    list. No proposal/cover-letter section and no "apply"/"submit"
-    button anywhere - see the note on manual applying in the README.
+    list. No proposal/cover-letter drafting anywhere in this flow - the
+    "Apply" link on each card just opens the original posting for you to
+    apply to yourself, see the note on manual applying in the README.
     """
     generated_at_str = datetime.datetime.now().strftime("%B %d, %Y at %H:%M")
 
-    # Sort by the tie-breaker FIRST, then by score - Python's sort is
-    # stable, so ties in score keep the newest-found-first order from
-    # this first pass instead of an arbitrary one.
+    # Confirmed-remote first, then unconfirmed, then on-site/needs-a-check
+    # last - see build_daily_job_card_html()'s docstring above.
+    ELIGIBILITY_SORT_RANK = {"remote": 0, "unconfirmed": 1}
+
+    def eligibility_rank(entry):
+        return ELIGIBILITY_SORT_RANK.get(entry.get("remote_status", "unconfirmed"), 2)
+
+    # Sort by the tie-breaker FIRST, then score, then eligibility tier -
+    # Python's sort is stable, so each later pass only breaks ties left
+    # by the earlier ones instead of undoing them.
     sorted_items = sorted(jobs_dict.items(), key=lambda item: item[1].get("date_found", ""), reverse=True)
     sorted_items.sort(key=lambda item: item[1]["score"], reverse=True)
+    sorted_items.sort(key=lambda item: eligibility_rank(item[1]))
 
     gap_summary_html = build_skill_gap_summary_html(jobs_dict)
 
@@ -2168,6 +2299,25 @@ def build_daily_report_html(jobs_dict):
         color: #ffffff;
         border-radius: 4px;
         padding: 2px 8px;
+    }}
+    .eligibility-tag {{
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 4px;
+        padding: 2px 8px;
+    }}
+    .eligibility-ok {{
+        background-color: #e3f5e9;
+        color: #1b6b3a;
+    }}
+    .eligibility-warning {{
+        background-color: #fff2d9;
+        color: #8a5a13;
+    }}
+    .eligibility-unclear {{
+        background-color: #eeeeee;
+        color: #555555;
     }}
     .job-title {{
         font-size: 17px;
