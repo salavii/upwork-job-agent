@@ -1199,9 +1199,11 @@ def load_results():
 def load_job_list():
     """
     Read JOB_LIST_FILE and return its contents as a dict with "jobs"
-    (hash -> entry) and "removed_hashes" (list) keys always present,
-    even if the file is missing/corrupt (first-ever run) or was written
-    by an older version that didn't have one of these keys yet.
+    (hash -> entry), "removed_hashes" (list), and "activity_log" (list of
+    {"date": "YYYY-MM-DD", "message": str} - see
+    record_no_new_jobs_activity()) keys always present, even if the file
+    is missing/corrupt (first-ever run) or was written by an older
+    version that didn't have one of these keys yet.
     """
     try:
         with open(JOB_LIST_FILE, "r", encoding="utf-8") as f:
@@ -1210,6 +1212,7 @@ def load_job_list():
         data = {}
     data.setdefault("jobs", {})
     data.setdefault("removed_hashes", [])
+    data.setdefault("activity_log", [])
     return data
 
 
@@ -1341,6 +1344,25 @@ def compute_display_remote_status(job_text, source, flags):
     return sources.classify_remote_status(
         location_or_type, description, assume_remote_board=(source in sources.REMOTE_FIRST_SOURCES)
     )
+
+
+def record_no_new_jobs_activity(job_list):
+    """
+    STEP 1 (empty-result handling) - when a --daily run finds NO new
+    qualifying jobs, append a dated "No new jobs found." line to
+    `job_list["activity_log"]` instead of leaving the report silent for
+    that day (see build_activity_log_html()). Idempotent per calendar
+    day: running --daily more than once on the same day with zero new
+    jobs each time only logs ONE line for that date, not one per run.
+    Mutates `job_list` in place and returns True if an entry was
+    actually appended (False if today already has one). Never touches
+    `job_list["jobs"]` - existing list entries are completely untouched.
+    """
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    if any(entry["date"] == today_str for entry in job_list["activity_log"]):
+        return False
+    job_list["activity_log"].append({"date": today_str, "message": "No new jobs found."})
+    return True
 
 
 def update_persistent_job_list():
@@ -2149,7 +2171,42 @@ def build_skill_gap_summary_html(jobs_dict):
     """
 
 
-def build_daily_report_html(jobs_dict):
+# How many recent "no new jobs" activity-log entries to show in the
+# report - the log itself keeps every entry forever (see
+# record_no_new_jobs_activity()), but the report only needs a recent
+# window so this section doesn't grow into a long wall of text after
+# months of daily runs.
+ACTIVITY_LOG_DISPLAY_LIMIT = 30
+
+
+def build_activity_log_html(activity_log):
+    """
+    STEP 1 (empty-result handling) - render the "No new jobs found."
+    activity log (see record_no_new_jobs_activity()) as a small, dated
+    list so every --daily run leaves a visible record, even on the days
+    it found nothing new. Newest first, capped at
+    ACTIVITY_LOG_DISPLAY_LIMIT entries. Returns "" (renders nothing) if
+    the log is empty, so a fresh install with no logged "empty" days
+    doesn't show an empty section.
+    """
+    if not activity_log:
+        return ""
+
+    entries = sorted(activity_log, key=lambda entry: entry["date"], reverse=True)[:ACTIVITY_LOG_DISPLAY_LIMIT]
+    items_html = "".join(
+        f'<li>{html.escape(format_date_heading(entry["date"]))} &mdash; {html.escape(entry["message"])}</li>'
+        for entry in entries
+    )
+
+    return f"""
+    <div class="activity-log-section">
+        <h2>🗒️ Activity log</h2>
+        <ul class="activity-log-list">{items_html}</ul>
+    </div>
+    """
+
+
+def build_daily_report_html(jobs_dict, activity_log=None):
     """
     Build the full HTML page for daily_report.html from the PERSISTENT
     job list (JOB_LIST_FILE's "jobs" dict: hash -> entry - see
@@ -2157,16 +2214,27 @@ def build_daily_report_html(jobs_dict):
     ACCUMULATES across every --daily run rather than being regenerated
     from scratch - see the module-level comment on JOB_LIST_FILE.
 
-    Grouped by eligibility tier FIRST (confirmed-remote jobs, then
-    unconfirmed, then on-site/needs-a-check - see
-    build_eligibility_tag_html()), and highest-SCORE-first WITHIN each
-    tier - so the postings that unambiguously work for an Italy study
-    permit are always easiest to find, at the top, without hiding or
-    removing anything else. Ties are broken by newest-found-first
-    (`date_found` is always a precise timestamp, unlike `date_posted`,
-    which some sources don't provide), just so equally-scored jobs have a
-    stable, sensible order rather than whatever order the dict happened
-    to iterate in.
+    Sort order (exactly, in this priority):
+      1. Eligibility tier - confirmed-remote jobs first, then
+         unconfirmed, then on-site/needs-a-check (see
+         build_eligibility_tag_html()) - so postings that unambiguously
+         work for an Italy study permit are always easiest to find.
+      2. Score, highest first, WITHIN each tier - a job never outranks
+         another job in a higher-priority tier just for having a higher
+         score, but within the same tier score is the only thing that
+         matters.
+      3. `date_found` (newest first) ONLY as the final tie-break for
+         jobs that are in the same tier AND have the identical score -
+         `date_found` is always a precise timestamp (when THIS tool
+         discovered the posting), unlike `date_posted`, which some
+         sources don't provide reliably - never used to overwrite an
+         existing entry's own recorded value (see
+         update_persistent_job_list() - `date_found` is set once, at
+         insertion, and never touched again).
+    Implemented as three chained stable sorts, applied least-significant
+    key first, so each later pass only breaks ties left by the earlier
+    one instead of undoing it - this is standard, well-defined Python
+    sort behavior (Timsort's stability), not a fragile trick.
 
     Each card has a "Remove" (x) button (server.py's /remove_daily_job)
     that permanently deletes it from JOB_LIST_FILE, and the page has one
@@ -2186,11 +2254,13 @@ def build_daily_report_html(jobs_dict):
 
     # Sort by the tie-breaker FIRST, then score, then eligibility tier -
     # Python's sort is stable, so each later pass only breaks ties left
-    # by the earlier ones instead of undoing them.
+    # by the earlier ones instead of undoing them. int(...) guards against
+    # a score ever being stored as anything but a plain number.
     sorted_items = sorted(jobs_dict.items(), key=lambda item: item[1].get("date_found", ""), reverse=True)
-    sorted_items.sort(key=lambda item: item[1]["score"], reverse=True)
+    sorted_items.sort(key=lambda item: int(item[1]["score"]), reverse=True)
     sorted_items.sort(key=lambda item: eligibility_rank(item[1]))
 
+    activity_log_html = build_activity_log_html(activity_log or [])
     gap_summary_html = build_skill_gap_summary_html(jobs_dict)
 
     if sorted_items:
@@ -2412,6 +2482,28 @@ def build_daily_report_html(jobs_dict):
         color: #888;
         font-size: 12px;
     }}
+    .activity-log-section {{
+        background-color: #ffffff;
+        border-radius: 8px;
+        padding: 14px 22px;
+        margin: 0 0 24px 0;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }}
+    .activity-log-section h2 {{
+        margin: 0 0 8px 0;
+        font-size: 15px;
+    }}
+    .activity-log-list {{
+        margin: 0;
+        padding-left: 20px;
+        font-size: 13px;
+        color: #666;
+        max-height: 160px;
+        overflow-y: auto;
+    }}
+    .activity-log-list li {{
+        margin: 3px 0;
+    }}
 </style>
 </head>
 <body>
@@ -2425,6 +2517,7 @@ def build_daily_report_html(jobs_dict):
         YOU remove a job below or click "Clear all."</p>
         <button id="clear-all-button" class="clear-all-button">Clear all</button>
     </div>
+    {activity_log_html}
     {gap_summary_html}
     {cards_html}
 
@@ -2489,7 +2582,7 @@ def rebuild_daily_report():
     build_report() for report.html after a delete).
     """
     job_list = load_job_list()
-    daily_report_html = build_daily_report_html(job_list["jobs"])
+    daily_report_html = build_daily_report_html(job_list["jobs"], job_list.get("activity_log", []))
     with open(DAILY_REPORT_FILE, "w", encoding="utf-8") as f:
         f.write(daily_report_html)
 
@@ -2571,6 +2664,9 @@ def cli_run_daily():
     print(f"Added {added} newly-qualifying job(s) (score > {FIT_SCORE_THRESHOLD}, real ML/AI engineering fit).")
     if deduped:
         print(f"Removed {deduped} duplicate(s) that shared a URL with another entry (kept the higher-scoring one).")
+    if added == 0 and record_no_new_jobs_activity(job_list):
+        save_job_list(job_list)
+        print("No new qualifying jobs today - logged a dated activity-log entry.")
 
     print("\n=== Step 4/4: writing daily_report.html ===")
     rebuild_daily_report()
