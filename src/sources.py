@@ -64,7 +64,8 @@ REQUEST_TIMEOUT_SECONDS = 15
 RETRY_ATTEMPTS = 2
 RETRY_BACKOFF_SECONDS = 2
 
-# These are normal job boards, not Upwork - what matters is whether a
+# These are standard job boards, not bid-based marketplaces - what
+# matters is whether a
 # posting is STILL OPEN, not how recently it was posted (no "first to
 # apply wins" dynamic here). There is deliberately NO age-based cutoff
 # any more - a good job posted a week ago that's still listed is exactly

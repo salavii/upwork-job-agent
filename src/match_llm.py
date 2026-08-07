@@ -1,7 +1,7 @@
 """
 match_llm.py
 
-Step 2 of the Upwork job-scoring agent: LLM-based scoring.
+Step 2 of the job-scoring agent: LLM-based scoring.
 
 What this script does:
 - Connects to a locally running Ollama server (see ask_ollama()).
@@ -1769,7 +1769,7 @@ def build_html_report(results_by_date, sorted_dates):
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Upwork Job Matches</title>
+<title>ML/AI Job Matches</title>
 <style>
     * {{
         box-sizing: border-box;
@@ -1896,7 +1896,7 @@ def build_html_report(results_by_date, sorted_dates):
 </head>
 <body>
     <div class="page-header">
-        <h1>Upwork Job Matches</h1>
+        <h1>ML/AI Job Matches</h1>
         <p class="generated-at">Generated {generated_at_str}</p>
     </div>
     {sections_html}
@@ -2629,7 +2629,8 @@ def cli_run_daily():
     Handle `python match_llm.py --daily`: the full end-to-end daily
     workflow.
         1. Fetch new jobs from every automatic source (cli_fetch_jobs()).
-           These are normal job boards, not Upwork - sources.py keeps
+           These are standard job boards, not bid-based marketplaces -
+           sources.py keeps
            any job still actively listed (regardless of how long ago it
            was posted) and only drops one a source explicitly marks as
            expired (see sources.posting_status()).

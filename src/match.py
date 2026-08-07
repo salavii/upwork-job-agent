@@ -1,7 +1,7 @@
 """
 match.py
 
-Step 1 of the Upwork job-scoring agent.
+Step 1 of the job-scoring agent.
 
 What this script does:
 1. Stores my list of skills.
@@ -325,7 +325,7 @@ if __name__ == "__main__":
     is required. Bonus points for NLP experience.
     """
 
-    # A real Upwork job posting, used to sanity-check the matcher against
+    # A real job posting, used to sanity-check the matcher against
     # actual job text (not just a hand-written example).
     rag_document_qa_job_description = """
     AI Engineer needed to build RAG Document Q&A System
@@ -350,4 +350,4 @@ if __name__ == "__main__":
     """
 
     run_match_report("LLaMA / LoRA example job", llama_lora_job_description)
-    run_match_report("Real Upwork job: RAG Document Q&A System", rag_document_qa_job_description)
+    run_match_report("Real job posting: RAG Document Q&A System", rag_document_qa_job_description)
