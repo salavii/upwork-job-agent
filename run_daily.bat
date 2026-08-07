@@ -6,11 +6,25 @@ REM scoring pipeline (match_llm.py --daily) and appends its output to
 REM daily_run_log.txt. Never applies to anything automatically - see
 REM README.md's "Applying stays manual" section.
 REM
-REM Uses the real anaconda3 Python (not the WindowsApps alias stub) and
-REM -X utf8 so job titles/descriptions with non-ASCII characters can
-REM never crash the run over a console codepage mismatch.
+REM Runs with -X utf8 so job titles/descriptions with non-ASCII characters
+REM can never crash the run over a console codepage mismatch.
+REM
+REM Two optional environment variables, so this file contains no paths
+REM specific to one machine:
+REM
+REM   JOB_AGENT_PYTHON  Python interpreter to use. Defaults to `python`.
+REM                     Set this to a full interpreter path if `python` on
+REM                     PATH resolves to the Windows Store alias stub rather
+REM                     than a real install, which fails silently under Task
+REM                     Scheduler.
+REM   OLLAMA_EXE        Ollama executable. Defaults to the standard per-user
+REM                     install location.
 
-cd /d D:\job\UPWORK-agent
+REM Run from the repo root regardless of where the scheduler invokes this.
+cd /d "%~dp0"
+
+if not defined JOB_AGENT_PYTHON set "JOB_AGENT_PYTHON=python"
+if not defined OLLAMA_EXE set "OLLAMA_EXE=%LOCALAPPDATA%\Programs\Ollama\ollama.exe"
 
 echo. >> daily_run_log.txt
 echo ===== Run started %date% %time% ===== >> daily_run_log.txt
@@ -24,9 +38,9 @@ curl -s -o nul -w "%%{http_code}" http://localhost:11434/api/tags > "%TEMP%\olla
 set /p OLLAMA_STATUS=<"%TEMP%\ollama_check.txt"
 if not "%OLLAMA_STATUS%"=="200" (
     echo Ollama not responding - starting it... >> daily_run_log.txt
-    start "" /min "C:\Users\Lenovo\AppData\Local\Programs\Ollama\ollama.exe" serve
+    start "" /min "%OLLAMA_EXE%" serve
     timeout /t 15 /nobreak > nul
 )
 
-"C:\Users\Lenovo\anaconda3\python.exe" -X utf8 src\match_llm.py --daily >> daily_run_log.txt 2>&1
+"%JOB_AGENT_PYTHON%" -X utf8 src\match_llm.py --daily >> daily_run_log.txt 2>&1
 echo ===== Run finished %date% %time% ===== >> daily_run_log.txt
