@@ -1,7 +1,7 @@
 """
 server.py
 
-Part 1 of the semi-automatic Upwork job grabber.
+Local capture server for the manual browser-extension flow.
 
 What this script does, and ONLY this:
 - Runs a small local HTTP server at http://localhost:8765.
@@ -12,8 +12,7 @@ What this script does, and ONLY this:
   (deduplication), so re-visiting or re-clicking on the same posting
   doesn't pile up duplicate entries.
 - Allows requests from a browser (CORS enabled), so the browser
-  extension (Part 2) can call this server directly from an Upwork job
-  page.
+  extension can call this server directly from a job posting page.
 - Prints a short confirmation line in the terminal every time a job is
   saved OR skipped as a duplicate.
 
