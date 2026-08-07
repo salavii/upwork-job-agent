@@ -1,23 +1,45 @@
-# ML/AI Job Agent
+# Job Matching Agent
 
-A personal job-hunting agent for ML/AI/data-science roles: it **finds**
-jobs automatically from seven public job boards, **scores** every one
-against your real resume using an **LLM** (a free local model via Ollama,
-or a cloud model like Claude Haiku for better accuracy), applies a set of
-hard-coded fit gates tuned from real testing (role type, seniority, job
-type, location/eligibility), and hands you a clean, ranked HTML report
-with direct links and a skill-gap analysis — every day, on a schedule,
-with zero manual browsing.
+A multi-source job matching and scoring system for ML/AI roles. It aggregates
+postings from **seven public job-board APIs**, normalizes them into one schema,
+filters for relevance, scores each posting against a candidate profile with an
+**LLM**, applies a layer of **deterministic eligibility gates** on top of the
+model's judgment, deduplicates against everything seen previously, and renders a
+ranked HTML report with skill-gap analysis. It runs unattended on a schedule.
 
-It also supports a second, fully manual path: a Chrome extension that
-saves individual Upwork postings you're already looking at, scored the
-same way, with an honest first-draft proposal for the ones worth
-applying to.
+```
+  7 job-board APIs / RSS
+           │
+           ▼
+  ┌──────────────────┐   normalize to one schema, retry-on-failure per source
+  │   sources.py     │   keyword relevance filter (title OR 2+ distinct terms)
+  └────────┬─────────┘   dead-posting filter
+           ▼
+  ┌──────────────────┐   dual-key dedup: exact text hash + normalized title|company
+  │  dedup + cache   │   results cache keyed by job hash, records which model scored it
+  └────────┬─────────┘
+           ▼
+  ┌──────────────────┐   component-fraction scoring against the candidate profile
+  │  LLM scoring     │   provider-swappable: Ollama (default) / Anthropic / OpenAI
+  └────────┬─────────┘   automatic local fallback if a cloud call fails
+           ▼
+  ┌──────────────────┐   role-type hard cap · seniority penalty · employment-type
+  │ rule-based gates │   exclusion · location/eligibility flags
+  └────────┬─────────┘   deterministic, in code — not left to the model
+           ▼
+  ranked HTML report + persistent job list + skill-gap summary
+```
+
+**Design note: the gates exist because the model alone wasn't trustworthy.**
+A local 8B model scored a Gartner "AI Strategy" analyst role 100/100 and a
+"Technical Recruiter" 75, because it conflates *"this text discusses AI"* with
+*"this role is AI engineering."* The deterministic gate layer is the answer to
+that, and it is the most load-bearing engineering decision in the project — see
+[Scoring gates](#scoring-gates).
 
 **Nothing here ever submits an application.** Every flag, cap, and
-report stops at "here's what I found, ranked, with a link" — you read,
-decide, and click apply yourself. See [Applying stays
-manual](#applying-stays-manual) for why that's permanent, not a
+report stops at "here's what I found, ranked, with a link." See [Applying stays
+manual](#applying-stays-manual) for why that's a permanent design decision, not a
 missing feature.
 
 ## What it does
@@ -27,13 +49,13 @@ missing feature.
    bypass. See [Automatic sources](#automatic-sources) below.
 2. **Filters for relevance and active listings.** Keyword-matches for
    ML/AI/data-science work, keeps any job still actively listed
-   (regardless of how long ago it was posted — this isn't Upwork, there's
-   no "first to apply wins"), and drops postings that are actually dead
-   ("no open roles").
-3. **Scores every job against your real resume**, using a local LLM (via
-   [Ollama](https://ollama.com)) that breaks each posting into its main
-   skill components and judges what fraction of it you could realistically
-   deliver — not just "does a keyword match."
+   (regardless of when it was posted — on a standard job board there is no
+   "first to apply wins" dynamic, so age is not a quality signal), and
+   drops postings that are actually dead ("no open roles").
+3. **Scores every job against a candidate profile**, using an LLM (locally
+   via [Ollama](https://ollama.com) by default) that breaks each posting
+   into its main skill components and judges what fraction of it the
+   candidate could realistically deliver — not just "does a keyword match."
 4. **Applies hard-coded fit gates** on top of the model's own judgment,
    because testing showed the model alone isn't reliable enough — see
    [Scoring gates](#scoring-gates) below.
@@ -44,16 +66,17 @@ missing feature.
    report that resets every time — see [The persistent job
    list](#the-persistent-job-list) below.
 6. **Runs unattended on a schedule** (Windows Task Scheduler, once daily
-   at 1pm out of the box) so the report is just waiting for you.
+   at 1pm out of the box).
 7. **Flags skill gaps on near-miss jobs.** For every job scoring above 60,
-   the report shows exactly what's costing you a clean match, split into
+   the report shows exactly what is costing a clean match, split into
    quick-to-learn gaps (a specific tool/library) vs. large gaps (years of
    experience, a different domain), plus a "Focus on these skills" summary
-   ranking the most-requested gaps across your whole list — see [Skill-gap
+   ranking the most-requested gaps across the whole list — see [Skill-gap
    analysis](#skill-gap-analysis) below.
-8. **(Optional, manual)** A Chrome extension + local server let you save
-   individual Upwork postings you're already viewing, scored the same
-   way, with a drafted first-pass proposal for strong matches.
+8. **(Optional, manual)** A Chrome extension + local server add a second,
+   manual capture path for individual postings, scored the same way, with a
+   drafted first-pass proposal for strong matches — see
+   [Optional: browser-extension capture](#optional-browser-extension-capture).
 
 ## Automatic sources
 
@@ -89,10 +112,10 @@ unrelated roles that mentioned "AI" once in passing, so `is_relevant()`
 requires EITHER a match in the job's TITLE, OR at least two DISTINCT
 keywords matched in the full text.
 
-**Active-listing filtering, not age filtering.** These are normal job
-boards, not Upwork — there's no "first to apply wins" dynamic, so what
-matters is whether a posting is still open, not how recently it was
-posted. There is deliberately no age cutoff: a good job posted a week
+**Active-listing filtering, not age filtering.** These are standard job
+boards rather than bid-based freelance marketplaces, so there is no
+"first to apply wins" dynamic — what matters is whether a posting is
+still open, not how recently it was posted. There is deliberately no age cutoff: a good job posted a week
 ago that's still listed is exactly as valid as one posted today. Every
 source's API only returns currently-listed postings in the first place,
 so a job is kept unless the source gives concrete evidence it has
@@ -235,9 +258,12 @@ python src/match_llm.py --daily
 This fetches from all 7 sources, scores anything new, and writes
 `daily_report.html` — open it in a browser.
 
-### (Optional) Manual Upwork extension
+### Optional: browser-extension capture
 
-If you also want to save individual Upwork postings you're browsing:
+A second, fully manual capture path for postings that are not on the seven
+automated sources. The bundled extension targets Upwork specifically — its host
+permissions and DOM selectors are written for `upwork.com` — but the server and
+scoring path it feeds are source-agnostic.
 
 1. **Start the local server:** `python src/server.py` (runs at
    `http://localhost:8765`, must stay running for the extension to save
@@ -298,7 +324,7 @@ them yourself:
 
 `src/server.py` must be running for Remove/Clear-all to work (same
 requirement as `report.html`'s delete button) — see
-[Setup](#optional-manual-upwork-extension).
+[Optional: browser-extension capture](#optional-browser-extension-capture).
 
 ## Skill-gap analysis
 
@@ -327,11 +353,18 @@ days/weeks (e.g. Docker, a specific API, a JS framework) — or a
 ## Running on a schedule (Windows Task Scheduler)
 
 `run_daily.bat` wraps `python src/match_llm.py --daily` for unattended runs:
-cds into the project directory, calls the real Python interpreter
-directly (not a PATH alias), runs with `-X utf8` so non-ASCII job titles
-never crash the run over a console codepage mismatch, checks whether
-Ollama is responding and starts it if not, and appends everything with
-timestamps to `daily_run_log.txt`.
+cds to the repo root via `%~dp0` (so it works wherever the repo lives), runs
+with `-X utf8` so non-ASCII job titles never crash the run over a console
+codepage mismatch, checks whether Ollama is responding and starts it if not,
+and appends everything with timestamps to `daily_run_log.txt`.
+
+Two optional environment variables keep machine-specific paths out of the
+file:
+
+| Variable | Default | When to set it |
+|---|---|---|
+| `JOB_AGENT_PYTHON` | `python` | If `python` on PATH resolves to the Windows Store alias stub rather than a real install — that fails silently under Task Scheduler |
+| `OLLAMA_EXE` | `%LOCALAPPDATA%\Programs\Ollama\ollama.exe` | Non-standard Ollama install location |
 
 To schedule it once daily at 1pm:
 ```
@@ -370,9 +403,14 @@ yourself.
   NLP** — it can't detect negation (e.g. "no work authorization
   required" would still match "work authorization"), so treat the flag
   as a prompt to go check, not a verdict.
-- **Job extraction (Upwork extension) depends on the current page
-  structure.** Falls back to grabbing visible text if selectors don't
-  match, so it degrades gracefully rather than failing outright.
+- **Gap lists are not always exhaustive.** On postings with many missing
+  requirements, the model sometimes reports only the single most critical
+  gap (e.g. "Arabic") instead of all of them (FastAPI, JWT, …). The score
+  itself is still correct and appropriately capped — this affects only the
+  human-readable gap explanation, not ranking. Low priority.
+- **Browser-extension capture depends on the current page structure.**
+  Falls back to grabbing visible text if selectors don't match, so it
+  degrades gracefully rather than failing outright.
 - **No automated test suite.** Verified by running against real Ollama
   calls and real job-board data, not a CI pipeline.
 
@@ -396,13 +434,12 @@ yourself.
 src/
   match_llm.py        Core scoring engine, gates, proposal drafting, caching, report/daily-digest, CLI
   sources.py          Automatic job discovery from 7 public job-board APIs/feeds
-  server.py           Local HTTP server for the manual Upwork extension flow (save/delete jobs)
+  server.py           Local HTTP server backing the extension capture flow (save/delete jobs)
   match.py            Deterministic keyword-matching baseline (no LLM) - kept as a comparison point
-extension/            Chrome extension (Manifest V3) for the manual Upwork flow
+extension/            Chrome extension (Manifest V3) for manual capture; targets upwork.com
 run_daily.bat          Task Scheduler wrapper for unattended --daily runs
-config.example.json    Template for config.json - copy and fill in your own profile
+config.example.json    Template for config.json - copy and fill in the candidate profile
 jobs.example.json      Example shape of jobs.json, for anyone cloning this repo
-KNOWN_ISSUES.md         Known, low-priority rough edges
 ```
 
 `config.json` (your personal profile), `jobs.json`, `results.json`,
